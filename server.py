@@ -15,6 +15,7 @@ import base64
 import contextlib
 import json
 import mimetypes
+import os
 import re
 import shutil
 import tempfile
@@ -224,6 +225,10 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
       <div class="row">
+        <div style="display:flex; align-items:center; gap:6px; background:#090e1a; border:1px solid var(--border); padding:4px 10px; border-radius:8px;">
+          <span style="font-size:0.78rem; color:var(--muted);">🔐 Secret Key:</span>
+          <input type="password" id="apiKeyInput" value="minhdan2k4A@123" style="width:140px; margin:0; padding:4px 8px; font-size:0.8rem;" onchange="localStorage.setItem('gemini_api_key', this.value)" />
+        </div>
         <a href="/docs" target="_blank" style="text-decoration:none;">
           <button class="purple">📘 Mở Swagger UI (/docs)</button>
         </a>
@@ -447,6 +452,17 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
 
   <script>
     let attachedFiles = []; // [{name, mime, base64, previewUrl}]
+    const savedKey = localStorage.getItem('gemini_api_key');
+    if (savedKey) document.getElementById('apiKeyInput').value = savedKey;
+
+    function apiHeaders(extra = {}) {
+      const key = (document.getElementById('apiKeyInput')?.value || 'minhdan2k4A@123').trim();
+      return {
+        'Authorization': 'Bearer ' + key,
+        'X-API-Key': key,
+        ...extra
+      };
+    }
 
     function switchTab(tabId, btn) {
       document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
@@ -654,7 +670,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       try {
         const res = await fetch('/v1/chat', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: apiHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify(payload)
         });
 
@@ -813,7 +829,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
 
     async function loadGems() {
       const sel = document.getElementById('chatGem');
-      const res = await fetch('/v1/gems');
+      const res = await fetch('/v1/gems', { headers: apiHeaders() });
       const data = await res.json();
       if (data.gems) {
         sel.innerHTML = '<option value="">-- Không dùng Gem --</option>' +
@@ -824,7 +840,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
     async function loadChatList() {
       const box = document.getElementById('chatHistoryList');
       box.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;">Đang tải...</div>';
-      const res = await fetch('/v1/chats');
+      const res = await fetch('/v1/chats', { headers: apiHeaders() });
       const data = await res.json();
       const chats = data.chats || [];
       if (!chats.length) {
@@ -845,7 +861,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       document.getElementById('chatId').value = cid;
       const res = await fetch('/v1/chats/read', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ chat_id: cid })
       });
       const data = await res.json();
@@ -866,7 +882,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       if (!confirm('Xóa đoạn chat ' + cid + ' khỏi lịch sử Gemini?')) return;
       await fetch('/v1/chats/delete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: apiHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ chat_id: cid })
       });
       if (document.getElementById('chatId').value === cid) {
@@ -879,7 +895,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       const out = document.getElementById('cookieOut');
       out.style.display = 'block';
       out.textContent = 'Đang quét cookie từ trình duyệt...';
-      const res = await fetch('/v1/cookies/fetch', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+      const res = await fetch('/v1/cookies/fetch', { method: 'POST', headers: apiHeaders({'Content-Type': 'application/json'}), body: '{}' });
       const data = await res.json();
       out.textContent = JSON.stringify(data, null, 2);
       await checkHealth();
@@ -889,7 +905,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       const out = document.getElementById('cookieOut');
       out.style.display = 'block';
       out.textContent = 'Đang xoay vòng __Secure-1PSIDTS...';
-      const res = await fetch('/v1/cookies/rotate', { method: 'POST' });
+      const res = await fetch('/v1/cookies/rotate', { method: 'POST', headers: apiHeaders() });
       const data = await res.json();
       out.textContent = JSON.stringify(data, null, 2);
       await checkHealth();
@@ -902,7 +918,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       out.textContent = 'Đang lưu và xác thực cookie...';
       const res = await fetch('/v1/cookies/paste', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: apiHeaders({'Content-Type': 'application/json'}),
         body: JSON.stringify({ raw })
       });
       const data = await res.json();
@@ -919,7 +935,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       out.textContent = `⏳ Đang bắn ${requests} đoạn chat song song (Semaphore = ${concurrency})...`;
       const res = await fetch('/v1/test/concurrent', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: apiHeaders({'Content-Type': 'application/json'}),
         body: JSON.stringify({ prompt, requests, concurrency, model })
       });
       const data = await res.json();
@@ -989,13 +1005,19 @@ SWAGGER_UI_HTML = r"""<!DOCTYPE html>
   <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
   <script>
     window.onload = () => {
-      window.ui = SwaggerUIBundle({
+      const ui = SwaggerUIBundle({
         url: '/openapi.json',
         dom_id: '#swagger-ui',
         deepLinking: true,
         defaultModelsExpandDepth: 1,
-        tryItOutEnabled: true
+        tryItOutEnabled: true,
+        onComplete: () => {
+          const defaultKey = localStorage.getItem('gemini_api_key') || 'minhdan2k4A@123';
+          ui.preauthorizeApiKey('BearerAuth', defaultKey);
+          ui.preauthorizeApiKey('ApiKeyAuth', defaultKey);
+        }
       });
+      window.ui = ui;
     };
   </script>
 </body>
@@ -1005,24 +1027,41 @@ SWAGGER_UI_HTML = r"""<!DOCTYPE html>
 OPENAPI_SPEC: dict[str, Any] = {
     "openapi": "3.0.3",
     "info": {
-        "title": "Gemini WebAPI Studio & REST Server",
-        "version": "2.1.1",
+        "title": "Gemini WebAPI Provider — Multimodal REST Server",
+        "version": "2.2.0",
         "description": (
-            "REST API Wrapper cho Google Gemini Web (`gemini.google.com`) hỗ trợ:\n"
-            "- **Chat đơn lượt & nhiều lượt** (`/v1/chat`)\n"
-            "- **Streaming từng token qua SSE** (`stream: true`)\n"
-            "- **Ép trả về JSON có cấu trúc** (`response_format: 'json'`)\n"
-            "- **Đính kèm Ảnh/PDF/File Base64** (`files`)\n"
-            "- **Tạo Ảnh AI Full-HD, Tạo Video (Veo), Tạo Nhạc (Lyria)**\n"
-            "- **Tương thích chuẩn OpenAI SDK** (`/v1/chat/completions`)"
+            "Core AI Provider Server đóng gói Google Gemini Web (`gemini.google.com`) cung cấp đầy đủ các API chuẩn cho mọi Backend:\n"
+            "- 🔐 **Bảo mật bằng Secret Key (`GEMINI_API_KEY`):** Truyền qua header `Authorization: Bearer <secret_key>` hoặc `X-API-Key: <secret_key>` (Mặc định: `minhdan2k4A@123`)\n"
+            "- 💬 **Text & Multimodal Chat (`/v1/chat`):** Chat đơn lượt/đa lượt, đính kèm Ảnh/PDF/Audio Base64, ép trả về JSON (`response_format: 'json'`), Streaming từng token (`stream: true`)\n"
+            "- 🖼️ **Image Generation & Editing (`/v1/images/generations`):** Tạo ảnh AI Full-HD (Imagen / Nano Banana) hoặc sửa ảnh đính kèm\n"
+            "- 🎬 **Video Generation (`/v1/videos/generations`):** Tạo video AI (Google Veo)\n"
+            "- 🎵 **Music & Audio Generation (`/v1/audio/generations`):** Tạo nhạc & bài hát AI (Google Lyria)\n"
+            "- 🤖 **OpenAI SDK Compatible (`/v1/chat/completions`, `/v1/models`):** Tương thích trực tiếp thư viện OpenAI SDK"
         ),
     },
-    "servers": [{"url": "http://127.0.0.1:8000", "description": "Local Gemini Server"}],
+    "servers": [{"url": "http://127.0.0.1:8000", "description": "Gemini Provider Server"}],
+    "components": {
+        "securitySchemes": {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "description": "Nhập Secret Key (mặc định: minhdan2k4A@123)",
+            },
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-Key",
+                "description": "Nhập Secret Key (mặc định: minhdan2k4A@123)",
+            },
+        }
+    },
+    "security": [{"BearerAuth": []}, {"ApiKeyAuth": []}],
     "paths": {
         "/health": {
             "get": {
-                "tags": ["System & Health"],
-                "summary": "Kiểm tra trạng thái kết nối, cookie, danh sách model & số luồng",
+                "tags": ["8. System & Load Testing"],
+                "summary": "Kiểm tra trạng thái kết nối, cookie, danh sách model & số luồng (Public)",
+                "security": [],
                 "responses": {
                     "200": {
                         "description": "Thông tin trạng thái hiện tại của GeminiClient",
@@ -1032,6 +1071,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                                     "initialized": True,
                                     "cookie_source": "Cache",
                                     "account_status": "AVAILABLE",
+                                    "auth_required": True,
                                     "cookies_file": "D:\\gemini-wrapper-api\\Gemini-API\\cookies.json",
                                     "cookies_file_exists": True,
                                     "max_concurrency": 3,
@@ -1049,17 +1089,10 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
             }
         },
-        "/v1/models": {
-            "get": {
-                "tags": ["System & Health"],
-                "summary": "Lấy danh sách các model khả dụng của tài khoản",
-                "responses": {"200": {"description": "Danh sách model chuẩn OpenAI"}},
-            }
-        },
         "/v1/chat": {
             "post": {
-                "tags": ["Chat & Multimodal (Khuyên dùng cho exam-epu-web)"],
-                "summary": "Gửi Prompt (Hỗ trợ Text, JSON Mode, SSE Streaming, Upload Ảnh/PDF, Tạo Ảnh/Nhạc/Video)",
+                "tags": ["1. Text & Multimodal Chat"],
+                "summary": "Gửi Prompt đa phương thức (Text, JSON Mode, SSE Token Streaming, Đính kèm Ảnh/PDF/File)",
                 "requestBody": {
                     "required": True,
                     "content": {
@@ -1071,7 +1104,13 @@ OPENAPI_SPEC: dict[str, Any] = {
                                     "prompt": {
                                         "type": "string",
                                         "description": "Nội dung câu hỏi hoặc yêu cầu gửi tới Gemini",
-                                        "example": "Giải thích câu hỏi trắc nghiệm sau: 1 + 1 bằng mấy? A. 1 B. 2 C. 3 D. 4",
+                                        "example": "Phân tích ưu nhược điểm của kiến trúc Microservices.",
+                                    },
+                                    "system_prompt": {
+                                        "type": "string",
+                                        "nullable": True,
+                                        "description": "Chỉ dẫn hệ thống (System Instruction) ghép vào đầu prompt",
+                                        "example": "Bạn là chuyên gia kiến trúc phần mềm. Hãy trả lời súc tích bằng tiếng Việt.",
                                     },
                                     "model": {
                                         "type": "string",
@@ -1082,7 +1121,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                                     "stream": {
                                         "type": "boolean",
                                         "default": False,
-                                        "description": "Nếu `true`, trả về luồng Server-Sent Events (`text/event-stream`) gõ từng chữ theo thời gian thực.",
+                                        "description": "Nếu `true`, trả về luồng Server-Sent Events (`text/event-stream`) gõ từng token theo thời gian thực.",
                                     },
                                     "response_format": {
                                         "type": "string",
@@ -1093,13 +1132,13 @@ OPENAPI_SPEC: dict[str, Any] = {
                                     "chat_id": {
                                         "type": "string",
                                         "nullable": True,
-                                        "description": "Truyền `cid` (ví dụ `c_...`) để chat nối tiếp cuộc hội thoại trước, hoặc để `null` để tạo đoạn chat mới.",
+                                        "description": "Truyền `cid` (ví dụ `c_...`) để chat nối tiếp hội thoại trước, hoặc `null` để tạo phiên mới.",
                                         "example": None,
                                     },
                                     "temporary": {
                                         "type": "boolean",
                                         "default": True,
-                                        "description": "Nếu `true`, không lưu đoạn chat vào lịch sử Gemini Web (rất hợp khi gọi API từ exam-epu-web).",
+                                        "description": "Nếu `true`, không lưu đoạn chat vào lịch sử tài khoản Gemini.",
                                     },
                                     "extended_thinking": {
                                         "type": "boolean",
@@ -1109,7 +1148,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                                     "gem": {
                                         "type": "string",
                                         "nullable": True,
-                                        "description": "ID hoặc tên Gem nếu muốn áp dụng System Prompt.",
+                                        "description": "ID hoặc tên Gem nếu muốn áp dụng Gem có sẵn trong tài khoản.",
                                         "example": None,
                                     },
                                     "save_media": {
@@ -1123,7 +1162,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                                         "items": {
                                             "type": "object",
                                             "properties": {
-                                                "name": {"type": "string", "example": "de_thi.png"},
+                                                "name": {"type": "string", "example": "diagram.png"},
                                                 "data": {
                                                     "type": "string",
                                                     "description": "Chuỗi Base64 của file (có hoặc không có tiền tố data:...;base64,)",
@@ -1134,28 +1173,28 @@ OPENAPI_SPEC: dict[str, Any] = {
                                 },
                             },
                             "examples": {
-                                "1_Hoi_Dap_Thuong": {
-                                    "summary": "1. Hỏi đáp / Giải thích câu hỏi (Trả về JSON 1 lần)",
+                                "1_Text_Chat": {
+                                    "summary": "1. Chat văn bản chuẩn (stream = false)",
                                     "value": {
-                                        "prompt": "Giải thích ngắn gọn vì sao 2 + 2 = 4?",
+                                        "prompt": "Giải thích ngắn gọn định luật bảo toàn năng lượng.",
                                         "model": "gemini-flash",
                                         "temporary": True,
                                         "stream": False,
                                     },
                                 },
-                                "2_Ep_Tra_Ve_JSON": {
-                                    "summary": "2. Ép Gemini trả về cấu trúc JSON (response_format = 'json')",
+                                "2_Structured_JSON": {
+                                    "summary": "2. Ép trả về cấu trúc JSON (response_format = 'json')",
                                     "value": {
-                                        "prompt": "Tạo 2 câu hỏi trắc nghiệm môn Tin học cơ bản theo cấu trúc JSON: {\"questions\": [{\"content\": \"...\", \"options\": [\"A\", \"B\", \"C\", \"D\"], \"correct\": 0, \"explanation\": \"...\"}]}",
+                                        "prompt": "Liệt kê 3 ngôn ngữ lập trình phổ biến theo JSON: {\"languages\": [{\"name\": \"...\", \"use_case\": \"...\"}]}",
                                         "model": "gemini-flash",
                                         "response_format": "json",
                                         "temporary": True,
                                     },
                                 },
-                                "3_Stream_Tung_Token": {
-                                    "summary": "3. Streaming từng token như trên Web (stream = true)",
+                                "3_SSE_Streaming": {
+                                    "summary": "3. Streaming từng token theo thời gian thực (stream = true)",
                                     "value": {
-                                        "prompt": "Giải thích từng bước nguyên lý hoạt động của động cơ không đồng bộ 3 pha.",
+                                        "prompt": "Viết một đoạn văn ngắn giới thiệu về Trí tuệ nhân tạo.",
                                         "model": "gemini-flash",
                                         "stream": True,
                                         "temporary": True,
@@ -1167,65 +1206,92 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
                 "responses": {
                     "200": {
-                        "description": "Kết quả trả về từ Gemini (hoặc luồng `text/event-stream` nếu `stream: true`)",
-                        "content": {
-                            "application/json": {
-                                "example": {
-                                    "text": "Nội dung câu trả lời...",
-                                    "json": None,
-                                    "thoughts": "Chuỗi suy luận của model (nếu có)...",
-                                    "chat_id": "c_1234567890",
-                                    "rcid": "r_abcdef",
-                                    "images": [
-                                        {
-                                            "url": "https://lh3.googleusercontent.com/...",
-                                            "local_url": "/media/20261110_image.png",
-                                            "title": "[Generated Image]",
-                                            "alt": "",
-                                            "type": "generated",
-                                        }
-                                    ],
-                                    "videos": [],
-                                    "media": [],
-                                    "elapsed_sec": 2.35,
-                                }
-                            }
-                        },
-                    }
+                        "description": "Kết quả trả về từ Gemini (hoặc luồng `text/event-stream` nếu `stream: true`)"
+                    },
+                    "401": {"description": "Sai hoặc thiếu Secret Key (`Authorization` / `X-API-Key`)"},
                 },
             }
         },
-        "/v1/explain-quiz": {
+        "/v1/images/generations": {
             "post": {
-                "tags": ["Chat & Multimodal (Khuyên dùng cho exam-epu-web)"],
-                "summary": "Giải thích câu hỏi trắc nghiệm cho exam-epu-web (An toàn khi đảo thứ tự đáp án A/B/C/D, hỗ trợ SSE Stream & Đính kèm ảnh)",
+                "tags": ["2. Image Generation & Editing (Imagen)"],
+                "summary": "Tạo Ảnh AI Full-HD hoặc Chỉnh sửa Ảnh (khi đính kèm ảnh gốc trong `files`)",
                 "requestBody": {
                     "required": True,
                     "content": {
                         "application/json": {
                             "schema": {
                                 "type": "object",
-                                "required": ["content", "options", "correctText"],
+                                "required": ["prompt"],
                                 "properties": {
-                                    "subject": {"type": "string", "example": "Mạng máy tính"},
-                                    "chapter": {"type": "string", "example": "Chương 4: Tầng giao vận"},
-                                    "content": {
+                                    "prompt": {
                                         "type": "string",
-                                        "example": "Giao thức nào sau đây hoạt động ở tầng Giao vận (Transport Layer) và cung cấp dịch vụ truyền dữ liệu tin cậy?",
+                                        "description": "Mô tả bức ảnh cần tạo hoặc yêu cầu chỉnh sửa ảnh đính kèm",
+                                        "example": "A futuristic cyberpunk street in Hanoi at night, neon lights, rain reflection, 8k photorealistic",
                                     },
-                                    "options": {
-                                        "type": "array",
-                                        "items": {"type": "string"},
-                                        "example": ["HTTP", "TCP", "IP", "UDP"],
-                                    },
-                                    "correctText": {
+                                    "model": {
                                         "type": "string",
-                                        "example": "TCP",
+                                        "nullable": True,
+                                        "example": "gemini-pro",
                                     },
-                                    "model": {"type": "string", "nullable": True, "example": "gemini-flash"},
-                                    "stream": {"type": "boolean", "default": True},
+                                    "save_media": {
+                                        "type": "boolean",
+                                        "default": True,
+                                        "description": "Tải ảnh Full-HD (s2048) về `/media/<filename>` trên server",
+                                    },
                                     "files": {
                                         "type": "array",
+                                        "description": "(Tùy chọn) Đính kèm ảnh gốc Base64 nếu muốn sửa ảnh (Image-to-Image)",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string", "example": "input.png"},
+                                                "data": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Danh sách ảnh Full-HD đã tạo (`images` gồm `url` gốc và `local_url` trên server)"
+                    }
+                },
+            }
+        },
+        "/v1/videos/generations": {
+            "post": {
+                "tags": ["3. Video Generation (Veo)"],
+                "summary": "Tạo Video AI bằng Google Veo (Text-to-Video hoặc Image-to-Video)",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["prompt"],
+                                "properties": {
+                                    "prompt": {
+                                        "type": "string",
+                                        "description": "Mô tả cảnh chuyển động video cần tạo",
+                                        "example": "A cinematic drone shot flying over Ha Long Bay at sunrise with mist over emerald water, slow motion",
+                                    },
+                                    "model": {
+                                        "type": "string",
+                                        "nullable": True,
+                                        "example": "gemini-pro",
+                                    },
+                                    "save_media": {
+                                        "type": "boolean",
+                                        "default": True,
+                                        "description": "Tải file MP4 và thumbnail về `/media/<filename>` trên server",
+                                    },
+                                    "files": {
+                                        "type": "array",
+                                        "description": "(Tùy chọn) Ảnh khởi đầu Base64 để tạo video từ ảnh",
                                         "items": {
                                             "type": "object",
                                             "properties": {
@@ -1241,15 +1307,54 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
                 "responses": {
                     "200": {
-                        "description": "Lời giải Markdown + KaTeX chi tiết (hoặc luồng SSE nếu stream: true)"
+                        "description": "Danh sách video MP4 (`videos` gồm `url`, `local_video_url`, `local_thumb_url`)"
+                    }
+                },
+            }
+        },
+        "/v1/audio/generations": {
+            "post": {
+                "tags": ["4. Music & Audio Generation (Lyria)"],
+                "summary": "Tạo Nhạc / Bài hát / Audio AI bằng Google Lyria (Trả về MP3, MP4 & Lời bài hát)",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["prompt"],
+                                "properties": {
+                                    "prompt": {
+                                        "type": "string",
+                                        "description": "Mô tả giai điệu, thể loại nhạc, nhạc cụ hoặc chủ đề bài hát",
+                                        "example": "A relaxing lo-fi chillhop beat with warm electric piano and soft vinyl crackle for coding",
+                                    },
+                                    "model": {
+                                        "type": "string",
+                                        "nullable": True,
+                                        "example": "gemini-pro",
+                                    },
+                                    "save_media": {
+                                        "type": "boolean",
+                                        "default": True,
+                                        "description": "Tải file nhạc MP3, video MP4 và ảnh bìa về `/media/<filename>`",
+                                    },
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Danh sách bản nhạc (`media` gồm `title`, `mp3_url`, `mp4_url`, `local_audio_url`, `local_video_url`)"
                     }
                 },
             }
         },
         "/v1/chat/completions": {
             "post": {
-                "tags": ["OpenAI Compatible"],
-                "summary": "Endpoint tương thích chuẩn OpenAI Chat Completions (Hỗ trợ cả stream: true/false)",
+                "tags": ["5. OpenAI SDK Compatible"],
+                "summary": "Endpoint tương thích chuẩn OpenAI Chat Completions (Hỗ trợ cả stream: true/false & response_format)",
                 "requestBody": {
                     "required": True,
                     "content": {
@@ -1260,6 +1365,11 @@ OPENAPI_SPEC: dict[str, Any] = {
                                 "properties": {
                                     "model": {"type": "string", "example": "gemini-flash"},
                                     "stream": {"type": "boolean", "default": False},
+                                    "response_format": {
+                                        "type": "string",
+                                        "enum": ["text", "json"],
+                                        "default": "text",
+                                    },
                                     "messages": {
                                         "type": "array",
                                         "items": {
@@ -1281,9 +1391,93 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "responses": {"200": {"description": "OpenAI ChatCompletion object"}},
             }
         },
+        "/v1/models": {
+            "get": {
+                "tags": ["5. OpenAI SDK Compatible"],
+                "summary": "Lấy danh sách các model khả dụng của tài khoản",
+                "responses": {"200": {"description": "Danh sách model chuẩn OpenAI"}},
+            }
+        },
+        "/v1/chats": {
+            "get": {
+                "tags": ["6. Chat History & Gems"],
+                "summary": "Lấy danh sách lịch sử các cuộc hội thoại trên Gemini",
+                "responses": {"200": {"description": "Danh sách chat (`cid`, `title`, `timestamp`)"}},
+            }
+        },
+        "/v1/chats/read": {
+            "post": {
+                "tags": ["6. Chat History & Gems"],
+                "summary": "Đọc toàn bộ nội dung các lượt hội thoại của một `chat_id`",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["chat_id"],
+                                "properties": {
+                                    "chat_id": {"type": "string", "example": "c_1234567890"},
+                                    "limit": {"type": "integer", "default": 20},
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {"200": {"description": "Danh sách các lượt chat (`turns`)"}},
+            }
+        },
+        "/v1/chats/delete": {
+            "post": {
+                "tags": ["6. Chat History & Gems"],
+                "summary": "Xóa một cuộc hội thoại khỏi lịch sử Gemini",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["chat_id"],
+                                "properties": {
+                                    "chat_id": {"type": "string", "example": "c_1234567890"},
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {"200": {"description": "Trạng thái xóa"}},
+            }
+        },
+        "/v1/gems": {
+            "get": {
+                "tags": ["6. Chat History & Gems"],
+                "summary": "Lấy danh sách Gems (System Prompts) trong tài khoản",
+                "responses": {"200": {"description": "Danh sách Gems"}},
+            }
+        },
+        "/v1/cookies/fetch": {
+            "post": {
+                "tags": ["7. Cookies & Session Management"],
+                "summary": "Tự động quét và nạp Cookie từ trình duyệt trên máy chủ",
+                "requestBody": {
+                    "required": False,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "browser": {"type": "string", "default": "auto"},
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {"200": {"description": "Kết quả quét cookie"}},
+            }
+        },
         "/v1/cookies/paste": {
             "post": {
-                "tags": ["Cookies & Auth"],
+                "tags": ["7. Cookies & Session Management"],
                 "summary": "Nạp/Cập nhật Cookie từ chuỗi Header hoặc JSON và lưu vào cookies.json",
                 "requestBody": {
                     "required": True,
@@ -1307,14 +1501,14 @@ OPENAPI_SPEC: dict[str, Any] = {
         },
         "/v1/cookies/rotate": {
             "post": {
-                "tags": ["Cookies & Auth"],
+                "tags": ["7. Cookies & Session Management"],
                 "summary": "Ép xoay vòng (rotate) __Secure-1PSIDTS ngay lập tức",
                 "responses": {"200": {"description": "Kết quả xoay vòng cookie"}},
             }
         },
         "/v1/test/concurrent": {
             "post": {
-                "tags": ["Testing"],
+                "tags": ["8. System & Load Testing"],
                 "summary": "Test bắn nhiều luồng chat song song qua Semaphore",
                 "requestBody": {
                     "required": True,
@@ -1351,6 +1545,7 @@ class GeminiAPIServer:
         proxy: str | None = None,
         max_concurrency: int = 3,
         auto_refresh: bool = True,
+        api_key: str = "minhdan2k4A@123",
         verbose: bool = False,
     ):
         self.cookies_path = Path(cookies_path)
@@ -1359,10 +1554,26 @@ class GeminiAPIServer:
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.active_requests = 0
         self.auto_refresh = auto_refresh
+        self.api_key = (api_key or "").strip()
         self.verbose = verbose
         self.client: GeminiClient | None = None
         self.last_error: str | None = None
         self._init_lock = asyncio.Lock()
+
+    def _verify_api_key(self, headers: dict[str, str]) -> bool:
+        if not self.api_key:
+            return True
+        x_key = headers.get("x-api-key", "").strip()
+        if x_key and x_key == self.api_key:
+            return True
+        auth = headers.get("authorization", "").strip()
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+            if token == self.api_key:
+                return True
+        elif auth == self.api_key:
+            return True
+        return False
 
     def _load_file_cookies(self) -> dict[str, str]:
         if not self.cookies_path.is_file():
@@ -1489,6 +1700,20 @@ class GeminiAPIServer:
                 await self._handle_health(writer)
                 return
 
+            # Mọi endpoint /v1/* đều bắt buộc xác thực bằng Secret Key (Authorization: Bearer <key> hoặc X-API-Key: <key>)
+            if path.startswith("/v1/") and not self._verify_api_key(headers):
+                await self._send_json(
+                    writer,
+                    401,
+                    {
+                        "error": (
+                            "Unauthorized: Sai hoặc thiếu Secret Key. "
+                            "Hãy truyền header 'Authorization: Bearer <secret_key>' hoặc 'X-API-Key: <secret_key>'."
+                        )
+                    },
+                )
+                return
+
             if method == "GET" and path == "/v1/models":
                 await self._handle_models(writer)
                 return
@@ -1510,8 +1735,16 @@ class GeminiAPIServer:
                 await self._handle_chat(writer, body_json)
                 return
 
-            if method == "POST" and path == "/v1/explain-quiz":
-                await self._handle_explain_quiz(writer, body_json)
+            if method == "POST" and path == "/v1/images/generations":
+                await self._handle_images_generate(writer, body_json)
+                return
+
+            if method == "POST" and path == "/v1/videos/generations":
+                await self._handle_videos_generate(writer, body_json)
+                return
+
+            if method == "POST" and path in ("/v1/audio/generations", "/v1/music/generations"):
+                await self._handle_audio_generate(writer, body_json)
                 return
 
             if method == "POST" and path == "/v1/chats/read":
@@ -1765,7 +1998,7 @@ class GeminiAPIServer:
             "Cache-Control: no-cache, no-transform\r\n"
             "Access-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-            "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+            "Access-Control-Allow-Headers: Content-Type, Authorization, X-API-Key\r\n"
             "Connection: close\r\n\r\n"
         ).encode("utf-8")
         writer.write(header)
@@ -1781,6 +2014,10 @@ class GeminiAPIServer:
         if not prompt:
             await self._send_json(writer, 400, {"error": "Missing 'prompt' in request body."})
             return
+
+        system_prompt = str(body.get("system_prompt") or "").strip()
+        if system_prompt:
+            prompt = f"{system_prompt}\n\n{prompt}"
 
         stream = bool(body.get("stream", False))
         response_format = str(body.get("response_format") or "text").lower()
@@ -1959,60 +2196,65 @@ class GeminiAPIServer:
         finally:
             shutil.rmtree(temp_upload_dir, ignore_errors=True)
 
-    async def _handle_explain_quiz(
+    async def _handle_images_generate(
         self, writer: asyncio.StreamWriter, body: dict[str, Any]
     ) -> None:
-        subject = str(body.get("subject") or "").strip()
-        chapter = str(body.get("chapter") or "").strip()
-        content = str(body.get("content") or "").strip()
-        options = body.get("options") or []
-        correct_text = str(body.get("correctText") or "").strip()
-
-        if not content or not options or not correct_text:
-            await self._send_json(
-                writer,
-                400,
-                {"error": "Thiếu thông tin câu hỏi ('content', 'options', 'correctText')."},
-            )
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            await self._send_json(writer, 400, {"error": "Missing 'prompt' for image generation."})
             return
-
-        wrong_options = [str(o).strip() for o in options if str(o).strip() != correct_text]
-        header_ctx = " – ".join(p for p in (subject, chapter) if p)
-
-        prompt_lines = [
-            f"Bạn là giảng viên đại học giải thích câu hỏi trắc nghiệm{f' môn {header_ctx}' if header_ctx else ''}.",
-            "LƯU Ý QUAN TRỌNG: Hệ thống thi trắc nghiệm sẽ XÁO TRỘN ngẫu nhiên thứ tự A, B, C, D đối với mỗi sinh viên. Vì vậy, TUYỆT ĐỐI KHÔNG gọi tên đáp án bằng chữ cái 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D'. Hãy trích dẫn trực tiếp NỘI DUNG của phương án khi giải thích.",
-            "Hãy dùng công thức toán/lý/điện trong cặp dấu $...$ (inline) hoặc $$...$$ (dòng riêng) chuẩn KaTeX nếu có.",
-            "",
-            f"**Câu hỏi:** {content}",
-            "",
-            "**Các phương án lựa chọn:**",
-            *[f"- {opt}" for opt in options],
-            "",
-            f"**Phương án đúng:** {correct_text}",
-            "",
-            "Hãy trình bày lời giải ngắn gọn, súc tích, dễ hiểu theo đúng cấu trúc Markdown sau:",
-            "#### 🎯 Giải thích đáp án đúng",
-            f"- Giải thích rõ vì sao **{correct_text}** là đáp án chính xác (nêu định nghĩa, bản chất hoặc các bước áp dụng công thức tính toán cụ thể).",
-            *(
-                [
-                    "#### 🔍 Phân tích các phương án gây nhiễu",
-                    "- Giải thích ngắn gọn vì sao từng phương án còn lại chưa chính xác (nhắc tên theo nội dung phương án, không dùng A/B/C/D).",
-                ]
-                if wrong_options
-                else []
-            ),
-            "#### 💡 Mẹo nhớ nhanh",
-            "- Tóm tắt 1 câu cốt lõi hoặc công thức quan trọng nhất để sinh viên nhớ ngay khi đi thi.",
-        ]
+        files = body.get("files") or []
+        if files and not re.search(r"\b(image|generate|edit|modify|vẽ|tạo ảnh|sửa ảnh)\b", prompt, re.I):
+            prompt = f"Use image generation tool to edit this attached image: {prompt}"
+        elif not re.search(r"\b(image|generate|draw|photo|vẽ|tạo ảnh)\b", prompt, re.I):
+            prompt = f"Generate a high-resolution image: {prompt}"
 
         chat_body = {
-            "prompt": "\n".join(prompt_lines),
-            "model": body.get("model") or "gemini-flash",
-            "stream": bool(body.get("stream", True)),
-            "temporary": True,
-            "save_media": False,
+            "prompt": prompt,
+            "model": body.get("model") or None,
+            "stream": False,
+            "temporary": bool(body.get("temporary", True)),
+            "save_media": bool(body.get("save_media", True)),
+            "files": files,
+        }
+        await self._handle_chat(writer, chat_body)
+
+    async def _handle_videos_generate(
+        self, writer: asyncio.StreamWriter, body: dict[str, Any]
+    ) -> None:
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            await self._send_json(writer, 400, {"error": "Missing 'prompt' for video generation."})
+            return
+        if not re.search(r"\b(video|clip|animate|tạo video)\b", prompt, re.I):
+            prompt = f"Generate a video: {prompt}"
+
+        chat_body = {
+            "prompt": prompt,
+            "model": body.get("model") or None,
+            "stream": False,
+            "temporary": bool(body.get("temporary", True)),
+            "save_media": bool(body.get("save_media", True)),
             "files": body.get("files") or [],
+        }
+        await self._handle_chat(writer, chat_body)
+
+    async def _handle_audio_generate(
+        self, writer: asyncio.StreamWriter, body: dict[str, Any]
+    ) -> None:
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+            await self._send_json(writer, 400, {"error": "Missing 'prompt' for audio/music generation."})
+            return
+        if not re.search(r"\b(music|song|audio|track|beat|nhạc|bài hát)\b", prompt, re.I):
+            prompt = f"Generate a music track: {prompt}"
+
+        chat_body = {
+            "prompt": prompt,
+            "model": body.get("model") or None,
+            "stream": False,
+            "temporary": bool(body.get("temporary", True)),
+            "save_media": bool(body.get("save_media", True)),
         }
         await self._handle_chat(writer, chat_body)
 
@@ -2334,7 +2576,7 @@ class GeminiAPIServer:
             f"Content-Length: {len(payload)}\r\n"
             "Access-Control-Allow-Origin: *\r\n"
             "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-            "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+            "Access-Control-Allow-Headers: Content-Type, Authorization, X-API-Key\r\n"
             "Connection: close\r\n\r\n"
         ).encode("utf-8")
         writer.write(header + payload)
@@ -2359,6 +2601,7 @@ async def run_api_server(
     proxy: str | None = None,
     max_concurrency: int = 3,
     auto_refresh: bool = True,
+    api_key: str = os.getenv("GEMINI_API_KEY", "minhdan2k4A@123"),
     verbose: bool = False,
 ) -> None:
     app = GeminiAPIServer(
@@ -2366,11 +2609,13 @@ async def run_api_server(
         proxy=proxy,
         max_concurrency=max_concurrency,
         auto_refresh=auto_refresh,
+        api_key=api_key,
         verbose=verbose,
     )
-    print(f"🚀 Khởi động Gemini WebAPI Studio tại: http://{host}:{port}")
+    print(f"🚀 Khởi động Gemini WebAPI Provider tại: http://{host}:{port}")
     print(f"   - Giao diện Multimodal Studio: http://{host}:{port}/")
-    print(f"   - OpenAI Compatible Endpoint:  POST http://{host}:{port}/v1/chat/completions")
+    print(f"   - Tài liệu Swagger UI:         http://{host}:{port}/docs")
+    print(f"   - Secret Key (/v1/*):          {api_key}")
     print(f"   - Concurrency Semaphore:       tối đa {max_concurrency} luồng song song")
 
     try:

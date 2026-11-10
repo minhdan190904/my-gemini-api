@@ -1060,6 +1060,7 @@ async def cmd_serve(args):
         proxy=args.proxy,
         max_concurrency=args.concurrency,
         auto_refresh=not args.no_auto_refresh,
+        api_key=args.api_key,
         verbose=args.verbose,
     )
     return 0
@@ -1237,6 +1238,11 @@ def build_parser():
         "--no-auto-refresh",
         action="store_true",
         help="Disable background cookie auto-refresh",
+    )
+    p_srv.add_argument(
+        "--api-key",
+        default=os.getenv("GEMINI_API_KEY", "minhdan2k4A@123"),
+        help="Secret API key required for /v1/* endpoints (default: GEMINI_API_KEY env or minhdan2k4A@123)",
     )
 
     return parser
