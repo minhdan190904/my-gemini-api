@@ -2595,7 +2595,7 @@ class GeminiAPIServer:
 
 
 async def run_api_server(
-    host: str = os.getenv("GEMINI_HOST", "127.0.0.1"),
+    host: str = os.getenv("GEMINI_HOST", "localhost"),
     port: int = int(os.getenv("GEMINI_PORT", "8000")),
     cookies_path: str | Path = "cookies.json",
     proxy: str | None = None,

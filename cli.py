@@ -1226,7 +1226,7 @@ def build_parser():
 
     # serve (HTTP API Server & Web Playground)
     p_srv = sub.add_parser("serve", help="Start local HTTP REST API Server & Web Playground")
-    p_srv.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    p_srv.add_argument("--host", default="localhost", help="Bind host (default: localhost)")
     p_srv.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     p_srv.add_argument(
         "--concurrency",
