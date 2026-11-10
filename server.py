@@ -262,6 +262,10 @@ PLAYGROUND_HTML = """<!DOCTYPE html>
             </div>
 
             <div style="display:flex; flex-direction:column; gap:8px; margin-top:8px;">
+              <label style="display:flex; align-items:center; gap:8px; color:var(--accent); cursor:pointer; font-weight:600;">
+                <input type="checkbox" id="chatStream" checked style="width:auto; margin:0;" />
+                ⚡ Streaming (Hiện từng token/chữ theo thời gian thực như Web)
+              </label>
               <label style="display:flex; align-items:center; gap:8px; color:var(--text); cursor:pointer;">
                 <input type="checkbox" id="chatTemp" style="width:auto; margin:0;" />
                 Temporary Chat (Không lưu vào lịch sử Gemini)
@@ -575,8 +579,10 @@ PLAYGROUND_HTML = """<!DOCTYPE html>
       sendBtn.disabled = true;
       loader.style.display = 'block';
 
+      const useStream = document.getElementById('chatStream').checked;
       const payload = {
         prompt,
+        stream: useStream,
         model: document.getElementById('chatModel').value || null,
         gem: document.getElementById('chatGem').value || null,
         chat_id: document.getElementById('chatId').value.trim() || null,
@@ -590,100 +596,164 @@ PLAYGROUND_HTML = """<!DOCTYPE html>
       attachedFiles = [];
       renderFileChips();
 
+      function buildMediaGalleryHtml(data) {
+        const allMediaItems = [];
+        for (const img of (data.images || [])) {
+          const displayUrl = img.local_url || img.url;
+          const badge = img.type === 'generated' ? '🎨 Ảnh AI (Full-HD)' : '🌐 Ảnh Web';
+          allMediaItems.push(`
+            <div class="media-item">
+              <a href="${displayUrl}" target="_blank">
+                <img src="${displayUrl}" alt="${escapeHtml(img.alt || img.title)}" loading="lazy" />
+              </a>
+              <div class="media-caption">
+                <span>${badge}</span>
+                <a href="${displayUrl}" download>⬇️ Tải ảnh</a>
+              </div>
+            </div>
+          `);
+        }
+        for (const vid of (data.videos || [])) {
+          const vUrl = vid.local_video_url || vid.url;
+          const thumbAttr = vid.local_thumb_url ? `poster="${vid.local_thumb_url}"` : '';
+          allMediaItems.push(`
+            <div class="media-item">
+              <video controls preload="metadata" ${thumbAttr} src="${vUrl}"></video>
+              <div class="media-caption">
+                <span>🎬 Video AI</span>
+                <a href="${vUrl}" download>⬇️ Tải MP4</a>
+              </div>
+            </div>
+          `);
+        }
+        for (const m of (data.media || [])) {
+          const aUrl = m.local_audio_url || m.mp3_url;
+          const vUrl = m.local_video_url || m.mp4_url;
+          const thumb = m.local_thumb_url || m.mp3_thumbnail;
+          allMediaItems.push(`
+            <div class="media-item">
+              ${thumb ? `<img src="${thumb}" style="max-height:180px;" alt="Cover" />` : ''}
+              ${aUrl ? `<audio controls src="${aUrl}"></audio>` : ''}
+              ${vUrl ? `<video controls preload="metadata" src="${vUrl}"></video>` : ''}
+              <div class="media-caption">
+                <span>🎵 ${escapeHtml(m.title || 'Audio / Nhạc AI')}</span>
+                <span>
+                  ${aUrl ? `<a href="${aUrl}" download style="margin-right:8px;">⬇️ MP3</a>` : ''}
+                  ${vUrl ? `<a href="${vUrl}" download>⬇️ MP4</a>` : ''}
+                </span>
+              </div>
+            </div>
+          `);
+        }
+        return allMediaItems.length ? `<div class="media-grid">${allMediaItems.join('')}</div>` : '';
+      }
+
       try {
         const res = await fetch('/v1/chat', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        const data = await res.json();
 
         const botCard = document.createElement('div');
         botCard.className = 'msg-card assistant';
+        feed.appendChild(botCard);
 
-        if (data.error) {
-          botCard.style.borderLeftColor = 'var(--err)';
-          botCard.innerHTML = `
-            <div class="msg-header"><span>❌ <b>LỖI</b></span><span>${new Date().toLocaleTimeString()}</span></div>
-            <div class="msg-text" style="color:#fca5a5;">${escapeHtml(data.error)}</div>
-          `;
-        } else {
-          if (data.chat_id && !payload.temporary) {
-            document.getElementById('chatId').value = data.chat_id;
-          }
-
-          let mediaHtml = '';
-          const allMediaItems = [];
-
-          // 1. Images (Generated or Web)
-          for (const img of (data.images || [])) {
-            const displayUrl = img.local_url || img.url;
-            const badge = img.type === 'generated' ? '🎨 Ảnh AI (Full-HD)' : '🌐 Ảnh Web';
-            allMediaItems.push(`
-              <div class="media-item">
-                <a href="${displayUrl}" target="_blank">
-                  <img src="${displayUrl}" alt="${escapeHtml(img.alt || img.title)}" loading="lazy" />
-                </a>
-                <div class="media-caption">
-                  <span>${badge}</span>
-                  <a href="${displayUrl}" download>⬇️ Tải ảnh</a>
-                </div>
-              </div>
-            `);
-          }
-
-          // 2. Videos (GeneratedVideo)
-          for (const vid of (data.videos || [])) {
-            const vUrl = vid.local_video_url || vid.url;
-            const thumbAttr = vid.local_thumb_url ? `poster="${vid.local_thumb_url}"` : '';
-            allMediaItems.push(`
-              <div class="media-item">
-                <video controls preload="metadata" ${thumbAttr} src="${vUrl}"></video>
-                <div class="media-caption">
-                  <span>🎬 Video AI</span>
-                  <a href="${vUrl}" download>⬇️ Tải MP4</a>
-                </div>
-              </div>
-            `);
-          }
-
-          // 3. Music / Audio (GeneratedMedia)
-          for (const m of (data.media || [])) {
-            const aUrl = m.local_audio_url || m.mp3_url;
-            const vUrl = m.local_video_url || m.mp4_url;
-            const thumb = m.local_thumb_url || m.mp3_thumbnail;
-            allMediaItems.push(`
-              <div class="media-item">
-                ${thumb ? `<img src="${thumb}" style="max-height:180px;" alt="Cover" />` : ''}
-                ${aUrl ? `<audio controls src="${aUrl}"></audio>` : ''}
-                ${vUrl ? `<video controls preload="metadata" src="${vUrl}"></video>` : ''}
-                <div class="media-caption">
-                  <span>🎵 ${escapeHtml(m.title || 'Audio / Nhạc AI')}</span>
-                  <span>
-                    ${aUrl ? `<a href="${aUrl}" download style="margin-right:8px;">⬇️ MP3</a>` : ''}
-                    ${vUrl ? `<a href="${vUrl}" download>⬇️ MP4</a>` : ''}
-                  </span>
-                </div>
-              </div>
-            `);
-          }
-
-          if (allMediaItems.length) {
-            mediaHtml = `<div class="media-grid">${allMediaItems.join('')}</div>`;
-          }
-
+        if (useStream && res.headers.get('content-type')?.includes('text/event-stream')) {
           botCard.innerHTML = `
             <div class="msg-header">
-              <span>✨ <b>GEMINI</b> (${escapeHtml(payload.model || 'default')}) | Chat ID: <code>${escapeHtml(data.chat_id || 'Temporary')}</code></span>
-              <span>⏱️ ${data.elapsed_sec}s</span>
+              <span class="hdr-left">✨ <b>GEMINI</b> (${escapeHtml(payload.model || 'default')}) | <span style="color:var(--accent);">⚡ Đang gõ từng token...</span></span>
+              <span class="hdr-right">⏱️ ...</span>
             </div>
-            ${data.thoughts ? `<div class="thoughts-box">💭 <b>Suy luận (Thoughts):</b>\n${escapeHtml(data.thoughts)}</div>` : ''}
-            <div class="msg-text">${escapeHtml(data.text)}</div>
-            ${mediaHtml}
+            <div class="thoughts-box" style="display:none;"></div>
+            <div class="msg-text"></div>
+            <div class="media-holder"></div>
           `;
+          const hdrLeft = botCard.querySelector('.hdr-left');
+          const hdrRight = botCard.querySelector('.hdr-right');
+          const thoughtsEl = botCard.querySelector('.thoughts-box');
+          const textEl = botCard.querySelector('.msg-text');
+          const mediaHolder = botCard.querySelector('.media-holder');
+
+          let accThoughts = '';
+          let accText = '';
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() || '';
+
+            for (const block of lines) {
+              const dataLine = block.split('\n').find(l => l.startsWith('data: '));
+              if (!dataLine) continue;
+              const rawJson = dataLine.slice(6).trim();
+              if (!rawJson || rawJson === '[DONE]') continue;
+              let evt;
+              try { evt = JSON.parse(rawJson); } catch { continue; }
+
+              if (evt.type === 'delta') {
+                if (evt.thoughts_delta) {
+                  accThoughts += evt.thoughts_delta;
+                  thoughtsEl.style.display = 'block';
+                  thoughtsEl.textContent = '💭 Suy luận (Thoughts):\n' + accThoughts;
+                }
+                if (evt.text_delta) {
+                  accText += evt.text_delta;
+                  textEl.textContent = accText;
+                }
+                feed.scrollTop = feed.scrollHeight;
+              } else if (evt.type === 'done') {
+                if (evt.chat_id && !payload.temporary) {
+                  document.getElementById('chatId').value = evt.chat_id;
+                }
+                if (evt.thoughts && !accThoughts) {
+                  thoughtsEl.style.display = 'block';
+                  thoughtsEl.textContent = '💭 Suy luận (Thoughts):\n' + evt.thoughts;
+                }
+                if (evt.text && !accText) {
+                  textEl.textContent = evt.text;
+                }
+                hdrLeft.innerHTML = `✨ <b>GEMINI</b> (${escapeHtml(payload.model || 'default')}) | Chat ID: <code>${escapeHtml(evt.chat_id || 'Temporary')}</code>`;
+                hdrRight.textContent = `⏱️ TTFT: ${evt.ttft_sec ?? '-'}s | Tổng: ${evt.elapsed_sec}s`;
+                mediaHolder.innerHTML = buildMediaGalleryHtml(evt);
+                feed.scrollTop = feed.scrollHeight;
+              } else if (evt.type === 'error') {
+                botCard.style.borderLeftColor = 'var(--err)';
+                textEl.style.color = '#fca5a5';
+                textEl.textContent = '❌ Lỗi: ' + evt.error;
+              }
+            }
+          }
+        } else {
+          const data = await res.json();
+          if (data.error) {
+            botCard.style.borderLeftColor = 'var(--err)';
+            botCard.innerHTML = `
+              <div class="msg-header"><span>❌ <b>LỖI</b></span><span>${new Date().toLocaleTimeString()}</span></div>
+              <div class="msg-text" style="color:#fca5a5;">${escapeHtml(data.error)}</div>
+            `;
+          } else {
+            if (data.chat_id && !payload.temporary) {
+              document.getElementById('chatId').value = data.chat_id;
+            }
+            const mediaHtml = buildMediaGalleryHtml(data);
+            botCard.innerHTML = `
+              <div class="msg-header">
+                <span>✨ <b>GEMINI</b> (${escapeHtml(payload.model || 'default')}) | Chat ID: <code>${escapeHtml(data.chat_id || 'Temporary')}</code></span>
+                <span>⏱️ ${data.elapsed_sec}s</span>
+              </div>
+              ${data.thoughts ? `<div class="thoughts-box">💭 <b>Suy luận (Thoughts):</b>\n${escapeHtml(data.thoughts)}</div>` : ''}
+              <div class="msg-text">${escapeHtml(data.text)}</div>
+              ${mediaHtml}
+            `;
+          }
+          feed.scrollTop = feed.scrollHeight;
         }
-        feed.appendChild(botCard);
-        feed.scrollTop = feed.scrollHeight;
       } catch (err) {
         alert('Lỗi kết nối tới server: ' + err);
       } finally {
@@ -1195,12 +1265,105 @@ class GeminiAPIServer:
         ]
         await self._send_json(writer, 200, {"gems": gems})
 
+    async def _extract_and_save_media(
+        self, output: Any, save_media: bool = True
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        images_out: list[dict[str, Any]] = []
+        for img in (output.images if output else None) or []:
+            is_gen = isinstance(img, GeneratedImage)
+            local_url = None
+            if save_media:
+                with contextlib.suppress(Exception):
+                    saved_path = await img.save(path=str(MEDIA_DIR), full_size=True)
+                    if saved_path:
+                        local_url = f"/media/{Path(saved_path).name}"
+            images_out.append(
+                {
+                    "url": img.url,
+                    "local_url": local_url,
+                    "title": img.title,
+                    "alt": img.alt,
+                    "type": "generated" if is_gen else "web",
+                }
+            )
+
+        videos_out: list[dict[str, Any]] = []
+        for vid in (output.videos if output else None) or []:
+            local_video_url = None
+            local_thumb_url = None
+            if save_media:
+                with contextlib.suppress(Exception):
+                    saved_dict = await vid.save(path=str(MEDIA_DIR))
+                    if isinstance(saved_dict, dict):
+                        if v_path := saved_dict.get("video"):
+                            local_video_url = f"/media/{Path(v_path).name}"
+                        if t_path := saved_dict.get("video_thumbnail"):
+                            local_thumb_url = f"/media/{Path(t_path).name}"
+            videos_out.append(
+                {
+                    "url": vid.url,
+                    "thumbnail": getattr(vid, "thumbnail", ""),
+                    "local_video_url": local_video_url,
+                    "local_thumb_url": local_thumb_url,
+                }
+            )
+
+        media_out: list[dict[str, Any]] = []
+        for m in (output.media if output else None) or []:
+            local_audio_url = None
+            local_video_url = None
+            local_thumb_url = None
+            if save_media:
+                with contextlib.suppress(Exception):
+                    saved_dict = await m.save(path=str(MEDIA_DIR), download_type="both")
+                    if isinstance(saved_dict, dict):
+                        if a_path := saved_dict.get("audio"):
+                            local_audio_url = f"/media/{Path(a_path).name}"
+                        if v_path := saved_dict.get("video"):
+                            local_video_url = f"/media/{Path(v_path).name}"
+                        if t_path := (
+                            saved_dict.get("audio_thumbnail")
+                            or saved_dict.get("video_thumbnail")
+                        ):
+                            local_thumb_url = f"/media/{Path(t_path).name}"
+            media_out.append(
+                {
+                    "title": m.title,
+                    "mp3_url": m.mp3_url,
+                    "mp4_url": m.mp4_url,
+                    "mp3_thumbnail": m.mp3_thumbnail,
+                    "local_audio_url": local_audio_url,
+                    "local_video_url": local_video_url,
+                    "local_thumb_url": local_thumb_url,
+                }
+            )
+        return images_out, videos_out, media_out
+
+    async def _send_sse_headers(self, writer: asyncio.StreamWriter) -> None:
+        header = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream; charset=utf-8\r\n"
+            "Cache-Control: no-cache, no-transform\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("utf-8")
+        writer.write(header)
+        await writer.drain()
+
+    async def _send_sse_event(self, writer: asyncio.StreamWriter, data: dict[str, Any]) -> None:
+        line = f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+        writer.write(line)
+        await writer.drain()
+
     async def _handle_chat(self, writer: asyncio.StreamWriter, body: dict[str, Any]) -> None:
         prompt = str(body.get("prompt") or "").strip()
         if not prompt:
             await self._send_json(writer, 400, {"error": "Missing 'prompt' in request body."})
             return
 
+        stream = bool(body.get("stream", False))
         model = body.get("model") or None
         gem = body.get("gem") or None
         chat_id = body.get("chat_id") or None
@@ -1225,6 +1388,85 @@ class GeminiAPIServer:
 
             client = await self.ensure_client()
             t0 = time.perf_counter()
+
+            if stream:
+                await self._send_sse_headers(writer)
+                ttft: float | None = None
+                output = None
+                try:
+                    async with self.semaphore:
+                        self.active_requests += 1
+                        try:
+                            if chat_id:
+                                latest = await client.fetch_latest_chat_response(chat_id)
+                                if latest:
+                                    chat = client.start_chat(
+                                        metadata=list(latest.metadata),
+                                        cid=chat_id,
+                                        rcid=latest.rcid,
+                                        model=model,
+                                        gem=gem,
+                                    )
+                                else:
+                                    chat = client.start_chat(cid=chat_id, model=model, gem=gem)
+                                stream_gen = chat.send_message_stream(
+                                    prompt,
+                                    files=upload_paths or None,
+                                    temporary=temporary,
+                                    extended_thinking=extended_thinking,
+                                )
+                            else:
+                                stream_gen = client.generate_content_stream(
+                                    prompt,
+                                    files=upload_paths or None,
+                                    model=model,
+                                    gem=gem,
+                                    temporary=temporary,
+                                    extended_thinking=extended_thinking,
+                                )
+
+                            async for chunk in stream_gen:
+                                output = chunk
+                                if chunk.text_delta or chunk.thoughts_delta:
+                                    if ttft is None:
+                                        ttft = round(time.perf_counter() - t0, 3)
+                                    await self._send_sse_event(
+                                        writer,
+                                        {
+                                            "type": "delta",
+                                            "text_delta": chunk.text_delta,
+                                            "thoughts_delta": chunk.thoughts_delta,
+                                        },
+                                    )
+                        finally:
+                            self.active_requests -= 1
+
+                    images_out, videos_out, media_out = await self._extract_and_save_media(
+                        output, save_media=save_media
+                    )
+                    elapsed = round(time.perf_counter() - t0, 3)
+                    cid = output.metadata[0] if (output and output.metadata) else chat_id
+                    await self._send_sse_event(
+                        writer,
+                        {
+                            "type": "done",
+                            "text": output.text if output else "",
+                            "thoughts": output.thoughts if output else None,
+                            "chat_id": cid,
+                            "rcid": output.rcid if output else None,
+                            "images": images_out,
+                            "videos": videos_out,
+                            "media": media_out,
+                            "ttft_sec": ttft,
+                            "elapsed_sec": elapsed,
+                        },
+                    )
+                    writer.write(b"data: [DONE]\n\n")
+                    await writer.drain()
+                except Exception as e:
+                    await self._send_sse_event(writer, {"type": "error", "error": str(e)})
+                return
+
             async with self.semaphore:
                 self.active_requests += 1
                 try:
@@ -1258,80 +1500,9 @@ class GeminiAPIServer:
                 finally:
                     self.active_requests -= 1
 
-            # Process & optionally save images, videos, and audio locally so browser can play/view directly
-            images_out: list[dict[str, Any]] = []
-            for img in output.images or []:
-                is_gen = isinstance(img, GeneratedImage)
-                local_url = None
-                if save_media:
-                    with contextlib.suppress(Exception):
-                        saved_path = await img.save(
-                            path=str(MEDIA_DIR),
-                            full_size=True,
-                        )
-                        if saved_path:
-                            local_url = f"/media/{Path(saved_path).name}"
-                images_out.append(
-                    {
-                        "url": img.url,
-                        "local_url": local_url,
-                        "title": img.title,
-                        "alt": img.alt,
-                        "type": "generated" if is_gen else "web",
-                    }
-                )
-
-            videos_out: list[dict[str, Any]] = []
-            for vid in output.videos or []:
-                local_video_url = None
-                local_thumb_url = None
-                if save_media:
-                    with contextlib.suppress(Exception):
-                        saved_dict = await vid.save(path=str(MEDIA_DIR))
-                        if isinstance(saved_dict, dict):
-                            if v_path := saved_dict.get("video"):
-                                local_video_url = f"/media/{Path(v_path).name}"
-                            if t_path := saved_dict.get("video_thumbnail"):
-                                local_thumb_url = f"/media/{Path(t_path).name}"
-                videos_out.append(
-                    {
-                        "url": vid.url,
-                        "thumbnail": getattr(vid, "thumbnail", ""),
-                        "local_video_url": local_video_url,
-                        "local_thumb_url": local_thumb_url,
-                    }
-                )
-
-            media_out: list[dict[str, Any]] = []
-            for m in output.media or []:
-                local_audio_url = None
-                local_video_url = None
-                local_thumb_url = None
-                if save_media:
-                    with contextlib.suppress(Exception):
-                        saved_dict = await m.save(path=str(MEDIA_DIR), download_type="both")
-                        if isinstance(saved_dict, dict):
-                            if a_path := saved_dict.get("audio"):
-                                local_audio_url = f"/media/{Path(a_path).name}"
-                            if v_path := saved_dict.get("video"):
-                                local_video_url = f"/media/{Path(v_path).name}"
-                            if t_path := (
-                                saved_dict.get("audio_thumbnail")
-                                or saved_dict.get("video_thumbnail")
-                            ):
-                                local_thumb_url = f"/media/{Path(t_path).name}"
-                media_out.append(
-                    {
-                        "title": m.title,
-                        "mp3_url": m.mp3_url,
-                        "mp4_url": m.mp4_url,
-                        "mp3_thumbnail": m.mp3_thumbnail,
-                        "local_audio_url": local_audio_url,
-                        "local_video_url": local_video_url,
-                        "local_thumb_url": local_thumb_url,
-                    }
-                )
-
+            images_out, videos_out, media_out = await self._extract_and_save_media(
+                output, save_media=save_media
+            )
             elapsed = round(time.perf_counter() - t0, 3)
             cid = output.metadata[0] if output.metadata else chat_id
             await self._send_json(
@@ -1357,6 +1528,7 @@ class GeminiAPIServer:
             await self._send_json(writer, 400, {"error": "Missing 'messages' list."})
             return
 
+        stream = bool(body.get("stream", False))
         model = body.get("model") or None
         parts = []
         for msg in messages:
@@ -1370,6 +1542,56 @@ class GeminiAPIServer:
         prompt = "\n\n".join(parts)
 
         client = await self.ensure_client()
+        now_ts = int(time.time())
+
+        if stream:
+            await self._send_sse_headers(writer)
+            async with self.semaphore:
+                self.active_requests += 1
+                try:
+                    async for chunk in client.generate_content_stream(
+                        prompt,
+                        model=model,
+                        temporary=bool(body.get("temporary", True)),
+                    ):
+                        if chunk.text_delta or chunk.thoughts_delta:
+                            delta_obj: dict[str, Any] = {}
+                            if chunk.text_delta:
+                                delta_obj["content"] = chunk.text_delta
+                            if chunk.thoughts_delta:
+                                delta_obj["reasoning_content"] = chunk.thoughts_delta
+                            await self._send_sse_event(
+                                writer,
+                                {
+                                    "id": f"chatcmpl-{chunk.rcid or now_ts}",
+                                    "object": "chat.completion.chunk",
+                                    "created": now_ts,
+                                    "model": model or "gemini-default",
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "delta": delta_obj,
+                                            "finish_reason": None,
+                                        }
+                                    ],
+                                },
+                            )
+                finally:
+                    self.active_requests -= 1
+            await self._send_sse_event(
+                writer,
+                {
+                    "id": f"chatcmpl-{now_ts}",
+                    "object": "chat.completion.chunk",
+                    "created": now_ts,
+                    "model": model or "gemini-default",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                },
+            )
+            writer.write(b"data: [DONE]\n\n")
+            await writer.drain()
+            return
+
         async with self.semaphore:
             self.active_requests += 1
             try:
@@ -1381,7 +1603,6 @@ class GeminiAPIServer:
             finally:
                 self.active_requests -= 1
 
-        now_ts = int(time.time())
         await self._send_json(
             writer,
             200,
