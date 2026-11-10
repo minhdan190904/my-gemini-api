@@ -1195,6 +1195,57 @@ OPENAPI_SPEC: dict[str, Any] = {
                 },
             }
         },
+        "/v1/explain-quiz": {
+            "post": {
+                "tags": ["Chat & Multimodal (Khuyên dùng cho exam-epu-web)"],
+                "summary": "Giải thích câu hỏi trắc nghiệm cho exam-epu-web (An toàn khi đảo thứ tự đáp án A/B/C/D, hỗ trợ SSE Stream & Đính kèm ảnh)",
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": ["content", "options", "correctText"],
+                                "properties": {
+                                    "subject": {"type": "string", "example": "Mạng máy tính"},
+                                    "chapter": {"type": "string", "example": "Chương 4: Tầng giao vận"},
+                                    "content": {
+                                        "type": "string",
+                                        "example": "Giao thức nào sau đây hoạt động ở tầng Giao vận (Transport Layer) và cung cấp dịch vụ truyền dữ liệu tin cậy?",
+                                    },
+                                    "options": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "example": ["HTTP", "TCP", "IP", "UDP"],
+                                    },
+                                    "correctText": {
+                                        "type": "string",
+                                        "example": "TCP",
+                                    },
+                                    "model": {"type": "string", "nullable": True, "example": "gemini-flash"},
+                                    "stream": {"type": "boolean", "default": True},
+                                    "files": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "data": {"type": "string"},
+                                            },
+                                        },
+                                    },
+                                },
+                            }
+                        }
+                    },
+                },
+                "responses": {
+                    "200": {
+                        "description": "Lời giải Markdown + KaTeX chi tiết (hoặc luồng SSE nếu stream: true)"
+                    }
+                },
+            }
+        },
         "/v1/chat/completions": {
             "post": {
                 "tags": ["OpenAI Compatible"],
@@ -1457,6 +1508,10 @@ class GeminiAPIServer:
 
             if method == "POST" and path == "/v1/chat":
                 await self._handle_chat(writer, body_json)
+                return
+
+            if method == "POST" and path == "/v1/explain-quiz":
+                await self._handle_explain_quiz(writer, body_json)
                 return
 
             if method == "POST" and path == "/v1/chats/read":
@@ -1903,6 +1958,63 @@ class GeminiAPIServer:
             )
         finally:
             shutil.rmtree(temp_upload_dir, ignore_errors=True)
+
+    async def _handle_explain_quiz(
+        self, writer: asyncio.StreamWriter, body: dict[str, Any]
+    ) -> None:
+        subject = str(body.get("subject") or "").strip()
+        chapter = str(body.get("chapter") or "").strip()
+        content = str(body.get("content") or "").strip()
+        options = body.get("options") or []
+        correct_text = str(body.get("correctText") or "").strip()
+
+        if not content or not options or not correct_text:
+            await self._send_json(
+                writer,
+                400,
+                {"error": "Thiếu thông tin câu hỏi ('content', 'options', 'correctText')."},
+            )
+            return
+
+        wrong_options = [str(o).strip() for o in options if str(o).strip() != correct_text]
+        header_ctx = " – ".join(p for p in (subject, chapter) if p)
+
+        prompt_lines = [
+            f"Bạn là giảng viên đại học giải thích câu hỏi trắc nghiệm{f' môn {header_ctx}' if header_ctx else ''}.",
+            "LƯU Ý QUAN TRỌNG: Hệ thống thi trắc nghiệm sẽ XÁO TRỘN ngẫu nhiên thứ tự A, B, C, D đối với mỗi sinh viên. Vì vậy, TUYỆT ĐỐI KHÔNG gọi tên đáp án bằng chữ cái 'Đáp án A', 'Đáp án B', 'Đáp án C', 'Đáp án D'. Hãy trích dẫn trực tiếp NỘI DUNG của phương án khi giải thích.",
+            "Hãy dùng công thức toán/lý/điện trong cặp dấu $...$ (inline) hoặc $$...$$ (dòng riêng) chuẩn KaTeX nếu có.",
+            "",
+            f"**Câu hỏi:** {content}",
+            "",
+            "**Các phương án lựa chọn:**",
+            *[f"- {opt}" for opt in options],
+            "",
+            f"**Phương án đúng:** {correct_text}",
+            "",
+            "Hãy trình bày lời giải ngắn gọn, súc tích, dễ hiểu theo đúng cấu trúc Markdown sau:",
+            "#### 🎯 Giải thích đáp án đúng",
+            f"- Giải thích rõ vì sao **{correct_text}** là đáp án chính xác (nêu định nghĩa, bản chất hoặc các bước áp dụng công thức tính toán cụ thể).",
+            *(
+                [
+                    "#### 🔍 Phân tích các phương án gây nhiễu",
+                    "- Giải thích ngắn gọn vì sao từng phương án còn lại chưa chính xác (nhắc tên theo nội dung phương án, không dùng A/B/C/D).",
+                ]
+                if wrong_options
+                else []
+            ),
+            "#### 💡 Mẹo nhớ nhanh",
+            "- Tóm tắt 1 câu cốt lõi hoặc công thức quan trọng nhất để sinh viên nhớ ngay khi đi thi.",
+        ]
+
+        chat_body = {
+            "prompt": "\n".join(prompt_lines),
+            "model": body.get("model") or "gemini-flash",
+            "stream": bool(body.get("stream", True)),
+            "temporary": True,
+            "save_media": False,
+            "files": body.get("files") or [],
+        }
+        await self._handle_chat(writer, chat_body)
 
     async def _handle_openai_chat(self, writer: asyncio.StreamWriter, body: dict[str, Any]) -> None:
         messages = body.get("messages") or []
