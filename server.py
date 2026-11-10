@@ -2595,8 +2595,8 @@ class GeminiAPIServer:
 
 
 async def run_api_server(
-    host: str = "127.0.0.1",
-    port: int = 8000,
+    host: str = os.getenv("GEMINI_HOST", "127.0.0.1"),
+    port: int = int(os.getenv("GEMINI_PORT", "8000")),
     cookies_path: str | Path = "cookies.json",
     proxy: str | None = None,
     max_concurrency: int = 3,
@@ -2612,7 +2612,12 @@ async def run_api_server(
         api_key=api_key,
         verbose=verbose,
     )
+    is_local_only = host in ("127.0.0.1", "localhost", "::1")
     print(f"🚀 Khởi động Gemini WebAPI Provider tại: http://{host}:{port}")
+    print(
+        f"   - Chế độ mạng:                 "
+        f"{'🔒 Localhost-Only (Chặn truy cập từ bên ngoài VPS)' if is_local_only else '🌐 Public'}"
+    )
     print(f"   - Giao diện Multimodal Studio: http://{host}:{port}/")
     print(f"   - Tài liệu Swagger UI:         http://{host}:{port}/docs")
     print(f"   - Secret Key (/v1/*):          {api_key}")
