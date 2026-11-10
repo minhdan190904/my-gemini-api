@@ -30,7 +30,7 @@ A reverse-engineered asynchronous Python wrapper for the [Google Gemini](https:/
 
 ## Features
 
-- **Persistent Cookies** - Automatically refreshes cookies in background. Optimized for always-on services.
+- **Persistent Cookies** - Automatically refreshes cookies in background. Optimized for always-on services hehe.
 - **Image Generation** - Natively supports generating and editing images with natural language.
 - **Video & Audio Generation** - Supports generating videos and audio/music content natively.
 - **Deep Research** - Full deep research workflow with plan creation, status polling, and result retrieval.
