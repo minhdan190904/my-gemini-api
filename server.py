@@ -21,11 +21,13 @@ import shutil
 import tempfile
 import time
 import traceback
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
+import urllib.request
 
+from curl_cffi.requests import AsyncSession
 from gemini_webapi import GeminiClient, logger
 from gemini_webapi.constants import COOKIE_1PSID, COOKIE_1PSIDTS
 from gemini_webapi.types.image import GeneratedImage
@@ -411,6 +413,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
             <button onclick="checkHealth()" class="secondary">🔄 Làm mới Trạng thái</button>
             <button onclick="autoFetchCookies()" class="success">🔍 Auto-Fetch từ Trình duyệt</button>
             <button onclick="rotateCookies()" class="secondary">♻️ Rotate __Secure-1PSIDTS</button>
+            <button onclick="testTelegramMonitor()" class="purple">📨 Test gửi Telegram</button>
           </div>
         </div>
 
@@ -838,6 +841,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
           <div><b>File Cookie:</b> <code>${data.cookies_file || 'cookies.json'}</code> (${data.cookies_file_exists ? 'Đã lưu' : 'Chưa có'})</div>
           <div><b>Thư mục Media đã tải:</b> <code>${data.media_dir || 'media_outputs/'}</code></div>
           <div><b>Giới hạn Đa luồng (Semaphore):</b> Tối đa <b>${data.max_concurrency}</b> luồng (Đang chạy: ${data.active_requests})</div>
+          <div><b>Telegram Monitor:</b> ${data.telegram_configured ? `<span style="color:var(--success);">● Đã bật (Chat ID: <code>${escapeHtml(data.telegram_chat_id)}</code>, Slow ≥ ${data.monitor_slow_ms}ms)</span>` : `<span style="color:var(--muted);">○ Chưa cấu hình TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID</span>`}</div>
           <div><b>Models mở khóa:</b> ${(data.models || []).join(', ') || 'Chưa có'}</div>
           ${data.last_error ? `<div style="color:var(--err);"><b>Lỗi gần nhất:</b> ${escapeHtml(data.last_error)}</div>` : ''}
         `;
@@ -930,6 +934,15 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       const data = await res.json();
       out.textContent = JSON.stringify(data, null, 2);
       await checkHealth();
+    }
+
+    async function testTelegramMonitor() {
+      const out = document.getElementById('cookieOut');
+      out.style.display = 'block';
+      out.textContent = '📨 Đang gửi tin nhắn kiểm tra tới Telegram Monitor...';
+      const res = await fetch('/v1/monitor/test', { method: 'POST', headers: apiHeaders() });
+      const data = await res.json();
+      out.textContent = JSON.stringify(data, null, 2);
     }
 
     async function saveRawCookies() {
@@ -1553,8 +1566,410 @@ OPENAPI_SPEC: dict[str, Any] = {
                 "responses": {"200": {"description": "Thống kê thời gian và kết quả từng luồng"}},
             }
         },
+        "/v1/monitor/test": {
+            "post": {
+                "tags": ["8. System & Load Testing"],
+                "summary": "Gửi tin nhắn kiểm tra tới nhóm Telegram Monitor (TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID)",
+                "responses": {"200": {"description": "Kết quả gửi thử Telegram"}},
+            }
+        },
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Telegram Monitor & Error Reporter (Đồng bộ logic với exam-epu-web)
+# ---------------------------------------------------------------------------
+
+VN_TZ = timezone(timedelta(hours=7))
+MAX_TELEGRAM_LEN = 4000
+DEDUPE_SEC = 300.0  # Cùng 1 lỗi / đường dẫn chậm chỉ báo tối đa 1 lần / 5 phút
+
+
+def _escape_html(text: Any) -> str:
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _vn_time(dt: datetime | None = None) -> str:
+    now = dt.astimezone(VN_TZ) if dt else datetime.now(tz=VN_TZ)
+    return now.strftime("%H:%M:%S %d/%m/%Y")
+
+
+def _fmt_ms(ms_val: float) -> str:
+    return f"{int(round(ms_val)):,}ms".replace(",", ".")
+
+
+class TelegramMonitor:
+    """Báo lỗi server, cảnh báo Cookie hết hạn, request AI chậm và nghẽn Event Loop về Telegram nhóm Monitor."""
+
+    def __init__(
+        self,
+        bot_token: str | None = None,
+        chat_id: str | None = None,
+        enabled: bool | None = None,
+        slow_ms: int | None = None,
+        lag_ms: int | None = None,
+        debug: bool | None = None,
+        server_url: str = "http://localhost:8000",
+    ):
+        self.bot_token = (
+            bot_token
+            if bot_token is not None
+            else (
+                os.getenv("TELEGRAM_BOT_TOKEN")
+                or os.getenv("TELEGRAM_MONITOR_BOT_TOKEN")
+                or ""
+            )
+        ).strip()
+        self.chat_id = (
+            chat_id
+            if chat_id is not None
+            else (
+                os.getenv("TELEGRAM_CHAT_ID")
+                or os.getenv("TELEGRAM_MONITOR_CHAT_ID")
+                or ""
+            )
+        ).strip()
+        env_enabled = os.getenv("MONITOR_ENABLED", "true").strip().lower()
+        self.enabled = (
+            enabled
+            if enabled is not None
+            else env_enabled not in ("false", "0", "no", "off")
+        )
+        self.slow_ms = (
+            slow_ms
+            if slow_ms is not None
+            else int(os.getenv("MONITOR_SLOW_MS", "15000") or "15000")
+        )
+        self.lag_ms = (
+            lag_ms
+            if lag_ms is not None
+            else int(os.getenv("MONITOR_LAG_MS", "500") or "500")
+        )
+        self.debug = (
+            debug
+            if debug is not None
+            else os.getenv("MONITOR_DEBUG", "0").strip() == "1"
+        )
+        self.server_url = server_url
+        self._recent: dict[str, float] = {}
+        self._lag_samples: list[tuple[float, float]] = []  # (timestamp, lag_ms)
+        self._active_reqs: dict[int, dict[str, Any]] = {}
+        self._req_seq = 0
+        self._watchdog_task: asyncio.Task | None = None
+        self._last_account_status: str | None = None
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+    def _dedupe(self, key: str) -> bool:
+        now = time.time()
+        last = self._recent.get(key, 0.0)
+        if last > now - DEDUPE_SEC:
+            return False
+        self._recent[key] = now
+        if len(self._recent) > 400:
+            cutoff = now - DEDUPE_SEC
+            self._recent = {k: t for k, t in self._recent.items() if t >= cutoff}
+        return True
+
+    def start_req(self, method: str, path: str, model: str | None = None) -> int:
+        self._req_seq += 1
+        req_id = self._req_seq
+        self._active_reqs[req_id] = {
+            "method": method,
+            "path": path,
+            "model": model,
+            "start": time.time(),
+            "perf_start": time.perf_counter(),
+            "concurrent": len(self._active_reqs),
+        }
+        return req_id
+
+    def end_req(self, req_id: int) -> dict[str, Any] | None:
+        return self._active_reqs.pop(req_id, None)
+
+    def lag_between(self, from_ts: float, to_ts: float) -> float:
+        max_lag = 0.0
+        for ts, lag in self._lag_samples:
+            if from_ts - 1.0 <= ts <= to_ts + 1.0 and lag > max_lag:
+                max_lag = lag
+        return max_lag
+
+    async def send_telegram(self, html: str) -> bool:
+        if self.debug:
+            print(f"[monitor:telegram]\n{html}\n")
+        if not self.is_configured:
+            return False
+
+        text = html[:MAX_TELEGRAM_LEN] + "…" if len(html) > MAX_TELEGRAM_LEN else html
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            async with AsyncSession() as session:
+                resp = await session.post(url, json=payload, timeout=8)
+                if resp.status_code != 200:
+                    logger.warning(
+                        f"[telegram:monitor] HTTP {resp.status_code}: {resp.text[:200]}"
+                    )
+                    return False
+                return True
+        except Exception:
+            # Fallback sang urllib nếu AsyncSession gặp sự cố
+            try:
+                data_bytes = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=data_bytes,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                await asyncio.to_thread(
+                    lambda: urllib.request.urlopen(req, timeout=8).read()
+                )
+                return True
+            except Exception as e2:
+                logger.warning(f"[telegram:monitor] gửi lỗi: {e2}")
+                return False
+
+    def report_error(
+        self,
+        error: BaseException | str,
+        context: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if isinstance(error, BaseException):
+            err_name = type(error).__name__
+            err_msg = str(error) or err_name
+            tb_lines = traceback.format_exception(
+                type(error), error, error.__traceback__
+            )
+            stack = "".join(tb_lines).strip()
+        else:
+            err_name = "Error"
+            err_msg = str(error)
+            stack = err_msg
+
+        dedupe_key = f"err|{context}|{err_msg[:160]}"
+        if not self._dedupe(dedupe_key):
+            return
+
+        stack_short = "\n".join(stack.splitlines()[-14:])
+        lines = [
+            f"🔴 <b>Lỗi Gemini API</b> · {_escape_html(context)}",
+            f"🕒 {_vn_time()} · {_escape_html(self.server_url)}",
+        ]
+        if extra:
+            for k, v in extra.items():
+                if v is not None and str(v) != "":
+                    lines.append(f"{_escape_html(k)}: {_escape_html(v)}")
+        lines.append(f"<b>{_escape_html(err_name)}:</b> {_escape_html(err_msg[:500])}")
+        if stack_short and stack_short != err_msg:
+            lines.append(f"<pre>{_escape_html(stack_short[:2400])}</pre>")
+
+        with contextlib.suppress(RuntimeError):
+            asyncio.create_task(self.send_telegram("\n".join(lines)))
+
+    def diagnose_slow(
+        self,
+        total_ms: float,
+        queue_ms: float,
+        upstream_ms: float,
+        lag_ms: float,
+        concurrent: int,
+        max_concurrency: int,
+        files_count: int,
+        ttft_ms: float | None,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if lag_ms >= 200:
+            reasons.append(
+                f"Event loop Python bị đứng {_fmt_ms(lag_ms)} trong lúc xử lý → có việc nặng chặn luồng (giải mã Base64 ảnh/file lớn hoặc ghi đĩa)"
+            )
+        if queue_ms >= 500:
+            reasons.append(
+                f"Chờ hàng đợi Semaphore {_fmt_ms(queue_ms)} (đang chạy tối đa {max_concurrency} luồng) → nhiều người gọi AI cùng lúc, cân nhắc tăng GEMINI_MAX_CONCURRENCY"
+            )
+        if files_count > 0:
+            reasons.append(
+                f"Đính kèm {files_count} file/ảnh → tốn thêm thời gian upload lên máy chủ Google"
+            )
+        if concurrent >= max_concurrency:
+            reasons.append(
+                f"Đang có {concurrent} request AI khác chạy song song lúc request này bắt đầu"
+            )
+        if upstream_ms >= total_ms * 0.65:
+            ttft_note = (
+                f" (TTFT ra chữ đầu: {_fmt_ms(ttft_ms)})"
+                if ttft_ms is not None
+                else ""
+            )
+            reasons.append(
+                f"Chủ yếu chờ máy chủ Google Gemini sinh phản hồi ({_fmt_ms(upstream_ms)} / {_fmt_ms(total_ms)}){ttft_note}"
+            )
+        if not reasons:
+            reasons.append("Không rõ – hàng đợi Semaphore và CPU đều bình thường")
+        return reasons
+
+    async def on_request_done(
+        self,
+        *,
+        method: str,
+        path: str,
+        status: int,
+        total_ms: float,
+        queue_ms: float = 0.0,
+        upstream_ms: float = 0.0,
+        ttft_ms: float | None = None,
+        model: str | None = None,
+        stream: bool = False,
+        files_count: int = 0,
+        concurrent: int = 0,
+        max_concurrency: int = 3,
+        lag_ms: float = 0.0,
+        prompt_preview: str | None = None,
+    ) -> None:
+        if self.debug:
+            print(
+                f"[monitor] {round(total_ms)}ms {method} {path} {status} · model={model or 'default'} "
+                f"· stream={stream} · queue={round(queue_ms)}ms · upstream={round(upstream_ms)}ms "
+                f"· ttft={round(ttft_ms) if ttft_ms else '-'}ms · files={files_count} "
+                f"· cùng lúc {concurrent} · đứng {round(lag_ms)}ms"
+            )
+
+        if not self.enabled or not self.is_configured:
+            return
+
+        if (
+            self.slow_ms > 0
+            and total_ms >= self.slow_ms
+            and self._dedupe(f"slow|{method}|{path}|{model or 'default'}")
+        ):
+            reasons = self.diagnose_slow(
+                total_ms=total_ms,
+                queue_ms=queue_ms,
+                upstream_ms=upstream_ms,
+                lag_ms=lag_ms,
+                concurrent=concurrent,
+                max_concurrency=max_concurrency,
+                files_count=files_count,
+                ttft_ms=ttft_ms,
+            )
+            msg_lines = [
+                f"🐢 <b>Request Gemini chậm</b> · {_fmt_ms(total_ms)}",
+                f"{_escape_html(method)}{' (SSE Stream)' if stream else ''} <code>{_escape_html(path)}</code> · {status}",
+                f"🤖 Model: <code>{_escape_html(model or 'default')}</code>{f' · 📎 {files_count} file đính kèm' if files_count else ''}",
+                f"⏱ Google Gemini: {_fmt_ms(upstream_ms)}"
+                + (f" · TTFT: {_fmt_ms(ttft_ms)}" if ttft_ms is not None else "")
+                + (f" · Chờ Semaphore: {_fmt_ms(queue_ms)}" if queue_ms >= 50 else ""),
+                f"🔀 Cùng lúc: {concurrent} request khác (tối đa {max_concurrency})",
+            ]
+            if prompt_preview:
+                clean_p = " ".join(prompt_preview.split())[:180]
+                msg_lines.append(f"💬 Prompt: <i>{_escape_html(clean_p)}</i>")
+            msg_lines.extend(
+                [
+                    "",
+                    "<b>Nguyên nhân có thể:</b>",
+                    *[f"• {_escape_html(r)}" for r in reasons],
+                    "",
+                    "<i>Cùng đường dẫn & model chỉ báo 1 lần / 5 phút</i>",
+                ]
+            )
+            await self.send_telegram("\n".join(msg_lines))
+
+    async def on_event_loop_lag(self, lag_ms: float) -> None:
+        if (
+            not self.enabled
+            or not self.is_configured
+            or self.lag_ms <= 0
+            or lag_ms < self.lag_ms
+            or not self._dedupe("lag")
+        ):
+            return
+        now = time.time()
+        running = sorted(self._active_reqs.values(), key=lambda r: r["start"])[:15]
+        running_lines = [
+            f"• {_escape_html(r['method'])} <code>{_escape_html(r['path'])}</code> "
+            f"({r.get('model') or 'default'}) – đã chạy {_fmt_ms((now - r['start']) * 1000)}"
+            for r in running
+        ]
+        msg_lines = [
+            f"🧱 <b>Gemini Server bị đứng</b> {_fmt_ms(lag_ms)}",
+            "Luồng asyncio Python bị chặn → mọi request AI đang gọi phải chờ.",
+            f"Đang chạy: {len(self._active_reqs)} request",
+        ]
+        if running_lines:
+            msg_lines.extend(
+                [
+                    "",
+                    "<b>Request đang chạy lúc đó (thủ phạm thường là cái chạy lâu nhất):</b>",
+                    *running_lines,
+                ]
+            )
+        msg_lines.extend(["", "<i>Báo tối đa 1 lần / 5 phút</i>"])
+        await self.send_telegram("\n".join(msg_lines))
+
+    def start_watchdog(self, server: "GeminiAPIServer") -> None:
+        if self._watchdog_task and not self._watchdog_task.done():
+            return
+
+        async def _loop() -> None:
+            interval = 1.0
+            tick = 0
+            while True:
+                t0 = time.perf_counter()
+                await asyncio.sleep(interval)
+                elapsed = time.perf_counter() - t0
+                lag_ms = max(0.0, (elapsed - interval) * 1000.0)
+                now = time.time()
+                self._lag_samples.append((now, lag_ms))
+                if len(self._lag_samples) > 180:
+                    del self._lag_samples[: len(self._lag_samples) - 180]
+
+                if lag_ms >= 200:
+                    with contextlib.suppress(Exception):
+                        await self.on_event_loop_lag(lag_ms)
+
+                tick += 1
+                # Mỗi 30 giây kiểm tra trạng thái tài khoản / cookie + dọn request treo
+                if tick % 30 == 0:
+                    for rid, rinfo in list(self._active_reqs.items()):
+                        if rinfo["start"] < now - 600:
+                            self._active_reqs.pop(rid, None)
+
+                    client = server.client
+                    if client:
+                        cur_status = client.account_status.name
+                        if (
+                            cur_status != "AVAILABLE"
+                            and self._last_account_status != cur_status
+                            and self._dedupe(f"acct_status|{cur_status}")
+                        ):
+                            await self.send_telegram(
+                                "\n".join(
+                                    [
+                                        f"🟠 <b>Cảnh báo tài khoản Gemini: {_escape_html(cur_status)}</b>",
+                                        f"🕒 {_vn_time()} · {_escape_html(self.server_url)}",
+                                        f"📝 {_escape_html(client.account_status.description)}",
+                                        "👉 Hãy kiểm tra và dán lại Cookie mới tại Web Studio hoặc CLI!",
+                                    ]
+                                )
+                            )
+                        self._last_account_status = cur_status
+
+        self._watchdog_task = asyncio.create_task(_loop())
 
 
 class GeminiAPIServer:
@@ -1568,6 +1983,9 @@ class GeminiAPIServer:
         auto_refresh: bool = True,
         api_key: str = "minhdan2k4A@123",
         verbose: bool = False,
+        server_url: str = "http://localhost:8000",
+        telegram_bot_token: str | None = None,
+        telegram_chat_id: str | None = None,
     ):
         self.cookies_path = Path(cookies_path)
         self.proxy = proxy
@@ -1580,6 +1998,11 @@ class GeminiAPIServer:
         self.client: GeminiClient | None = None
         self.last_error: str | None = None
         self._init_lock = asyncio.Lock()
+        self.monitor = TelegramMonitor(
+            bot_token=telegram_bot_token,
+            chat_id=telegram_chat_id,
+            server_url=server_url,
+        )
 
     def _verify_api_key(self, headers: dict[str, str]) -> bool:
         if not self.api_key:
@@ -1662,6 +2085,15 @@ class GeminiAPIServer:
                 return client
             except Exception as e:
                 self.last_error = str(e)
+                self.monitor.report_error(
+                    e,
+                    "ensure_client (Lỗi khởi tạo / hết hạn Cookie)",
+                    {
+                        "CookiesFile": str(self.cookies_path.resolve()),
+                        "Có 1PSID": "Có" if psid else "Không",
+                        "Có 1PSIDTS": "Có" if psidts else "Không",
+                    },
+                )
                 raise
 
     async def handle_request(
@@ -1796,13 +2228,22 @@ class GeminiAPIServer:
                 await self._handle_cookies_rotate(writer)
                 return
 
+            if method == "POST" and path == "/v1/monitor/test":
+                await self._handle_monitor_test(writer)
+                return
+
             await self._send_json(writer, 404, {"error": f"Not found: {method} {path}"})
         except Exception as e:
             logger.debug(f"Server request error: {e}")
+            req_label = f"{locals().get('method', 'REQ')} {locals().get('path', '/')}"
+            self.monitor.report_error(e, f"API {req_label}")
             with contextlib.suppress(Exception):
                 await self._send_json(writer, 500, {"error": str(e)})
         finally:
             with contextlib.suppress(Exception):
+                await writer.drain()
+                if writer.can_write_eof():
+                    writer.write_eof()
                 writer.close()
                 await writer.wait_closed()
 
@@ -1860,6 +2301,11 @@ class GeminiAPIServer:
                 "cache_file": cache_path,
                 "max_concurrency": self.max_concurrency,
                 "active_requests": self.active_requests,
+                "telegram_configured": self.monitor.is_configured,
+                "telegram_chat_id": self.monitor.chat_id if self.monitor.is_configured else None,
+                "monitor_enabled": self.monitor.enabled,
+                "monitor_slow_ms": self.monitor.slow_ms,
+                "monitor_lag_ms": self.monitor.lag_ms,
                 "models": models,
                 "models_detail": models_detail,
                 "last_error": self.last_error,
@@ -2072,148 +2518,218 @@ class GeminiAPIServer:
 
             client = await self.ensure_client()
             t0 = time.perf_counter()
+            wall_start = time.time()
+            concurrent_at_start = self.active_requests
+            req_id = self.monitor.start_req("POST", "/v1/chat", model=model)
 
-            if stream:
-                await self._send_sse_headers(writer)
-                ttft: float | None = None
-                output = None
-                try:
-                    async with self.semaphore:
-                        self.active_requests += 1
-                        try:
-                            if chat_id:
-                                latest = await client.fetch_latest_chat_response(chat_id)
-                                if latest:
-                                    chat = client.start_chat(
-                                        metadata=list(latest.metadata),
-                                        cid=chat_id,
-                                        rcid=latest.rcid,
-                                        model=model,
-                                        gem=gem,
+            try:
+                if stream:
+                    await self._send_sse_headers(writer)
+                    ttft: float | None = None
+                    output = None
+                    queue_ms = 0.0
+                    upstream_ms = 0.0
+                    try:
+                        t_q0 = time.perf_counter()
+                        async with self.semaphore:
+                            queue_ms = (time.perf_counter() - t_q0) * 1000.0
+                            t_up0 = time.perf_counter()
+                            self.active_requests += 1
+                            try:
+                                if chat_id:
+                                    latest = await client.fetch_latest_chat_response(chat_id)
+                                    if latest:
+                                        chat = client.start_chat(
+                                            metadata=list(latest.metadata),
+                                            cid=chat_id,
+                                            rcid=latest.rcid,
+                                            model=model,
+                                            gem=gem,
+                                        )
+                                    else:
+                                        chat = client.start_chat(cid=chat_id, model=model, gem=gem)
+                                    stream_gen = chat.send_message_stream(
+                                        prompt,
+                                        files=upload_paths or None,
+                                        temporary=temporary,
+                                        extended_thinking=extended_thinking,
                                     )
                                 else:
-                                    chat = client.start_chat(cid=chat_id, model=model, gem=gem)
-                                stream_gen = chat.send_message_stream(
-                                    prompt,
-                                    files=upload_paths or None,
-                                    temporary=temporary,
-                                    extended_thinking=extended_thinking,
-                                )
-                            else:
-                                stream_gen = client.generate_content_stream(
-                                    prompt,
-                                    files=upload_paths or None,
+                                    stream_gen = client.generate_content_stream(
+                                        prompt,
+                                        files=upload_paths or None,
+                                        model=model,
+                                        gem=gem,
+                                        temporary=temporary,
+                                        extended_thinking=extended_thinking,
+                                    )
+
+                                async for chunk in stream_gen:
+                                    output = chunk
+                                    if chunk.text_delta or chunk.thoughts_delta:
+                                        if ttft is None:
+                                            ttft = round(time.perf_counter() - t0, 3)
+                                        await self._send_sse_event(
+                                            writer,
+                                            {
+                                                "type": "delta",
+                                                "text_delta": chunk.text_delta,
+                                                "thoughts_delta": chunk.thoughts_delta,
+                                            },
+                                        )
+                            finally:
+                                self.active_requests -= 1
+                                upstream_ms = (time.perf_counter() - t_up0) * 1000.0
+
+                        images_out, videos_out, media_out = await self._extract_and_save_media(
+                            output, save_media=save_media
+                        )
+                        elapsed = round(time.perf_counter() - t0, 3)
+                        cid = output.metadata[0] if (output and output.metadata) else chat_id
+                        final_text = output.text if output else ""
+                        parsed_json = (
+                            _extract_json_from_text(final_text)
+                            if response_format == "json"
+                            else None
+                        )
+                        await self._send_sse_event(
+                            writer,
+                            {
+                                "type": "done",
+                                "text": final_text,
+                                "json": parsed_json,
+                                "thoughts": output.thoughts if output else None,
+                                "chat_id": cid,
+                                "rcid": output.rcid if output else None,
+                                "images": images_out,
+                                "videos": videos_out,
+                                "media": media_out,
+                                "ttft_sec": ttft,
+                                "elapsed_sec": elapsed,
+                            },
+                        )
+                        writer.write(b"data: [DONE]\n\n")
+                        await writer.drain()
+                        await self.monitor.on_request_done(
+                            method="POST",
+                            path="/v1/chat",
+                            status=200,
+                            total_ms=elapsed * 1000.0,
+                            queue_ms=queue_ms,
+                            upstream_ms=upstream_ms,
+                            ttft_ms=(ttft * 1000.0) if ttft is not None else None,
+                            model=model,
+                            stream=True,
+                            files_count=len(upload_paths),
+                            concurrent=concurrent_at_start,
+                            max_concurrency=self.max_concurrency,
+                            lag_ms=self.monitor.lag_between(wall_start, time.time()),
+                            prompt_preview=prompt,
+                        )
+                    except Exception as e:
+                        self.monitor.report_error(
+                            e,
+                            "POST /v1/chat (SSE Stream)",
+                            {
+                                "Model": model or "default",
+                                "Files": str(len(upload_paths)),
+                                "Đang chạy": f"{self.active_requests}/{self.max_concurrency}",
+                                "Prompt": " ".join(prompt.split())[:160],
+                            },
+                        )
+                        await self._send_sse_event(writer, {"type": "error", "error": str(e)})
+                    return
+
+                t_q0 = time.perf_counter()
+                async with self.semaphore:
+                    queue_ms = (time.perf_counter() - t_q0) * 1000.0
+                    t_up0 = time.perf_counter()
+                    self.active_requests += 1
+                    try:
+                        if chat_id:
+                            latest = await client.fetch_latest_chat_response(chat_id)
+                            if latest:
+                                chat = client.start_chat(
+                                    metadata=list(latest.metadata),
+                                    cid=chat_id,
+                                    rcid=latest.rcid,
                                     model=model,
                                     gem=gem,
-                                    temporary=temporary,
-                                    extended_thinking=extended_thinking,
                                 )
-
-                            async for chunk in stream_gen:
-                                output = chunk
-                                if chunk.text_delta or chunk.thoughts_delta:
-                                    if ttft is None:
-                                        ttft = round(time.perf_counter() - t0, 3)
-                                    await self._send_sse_event(
-                                        writer,
-                                        {
-                                            "type": "delta",
-                                            "text_delta": chunk.text_delta,
-                                            "thoughts_delta": chunk.thoughts_delta,
-                                        },
-                                    )
-                        finally:
-                            self.active_requests -= 1
-
-                    images_out, videos_out, media_out = await self._extract_and_save_media(
-                        output, save_media=save_media
-                    )
-                    elapsed = round(time.perf_counter() - t0, 3)
-                    cid = output.metadata[0] if (output and output.metadata) else chat_id
-                    final_text = output.text if output else ""
-                    parsed_json = (
-                        _extract_json_from_text(final_text)
-                        if response_format == "json"
-                        else None
-                    )
-                    await self._send_sse_event(
-                        writer,
-                        {
-                            "type": "done",
-                            "text": final_text,
-                            "json": parsed_json,
-                            "thoughts": output.thoughts if output else None,
-                            "chat_id": cid,
-                            "rcid": output.rcid if output else None,
-                            "images": images_out,
-                            "videos": videos_out,
-                            "media": media_out,
-                            "ttft_sec": ttft,
-                            "elapsed_sec": elapsed,
-                        },
-                    )
-                    writer.write(b"data: [DONE]\n\n")
-                    await writer.drain()
-                except Exception as e:
-                    await self._send_sse_event(writer, {"type": "error", "error": str(e)})
-                return
-
-            async with self.semaphore:
-                self.active_requests += 1
-                try:
-                    if chat_id:
-                        latest = await client.fetch_latest_chat_response(chat_id)
-                        if latest:
-                            chat = client.start_chat(
-                                metadata=list(latest.metadata),
-                                cid=chat_id,
-                                rcid=latest.rcid,
-                                model=model,
-                                gem=gem,
+                            else:
+                                chat = client.start_chat(cid=chat_id, model=model, gem=gem)
+                            output = await chat.send_message(
+                                prompt,
+                                files=upload_paths or None,
+                                temporary=temporary,
+                                extended_thinking=extended_thinking,
                             )
                         else:
-                            chat = client.start_chat(cid=chat_id, model=model, gem=gem)
-                        output = await chat.send_message(
-                            prompt,
-                            files=upload_paths or None,
-                            temporary=temporary,
-                            extended_thinking=extended_thinking,
+                            output = await client.generate_content(
+                                prompt,
+                                files=upload_paths or None,
+                                model=model,
+                                gem=gem,
+                                temporary=temporary,
+                                extended_thinking=extended_thinking,
+                            )
+                    except Exception as e:
+                        self.monitor.report_error(
+                            e,
+                            "POST /v1/chat",
+                            {
+                                "Model": model or "default",
+                                "Files": str(len(upload_paths)),
+                                "Đang chạy": f"{self.active_requests}/{self.max_concurrency}",
+                                "Prompt": " ".join(prompt.split())[:160],
+                            },
                         )
-                    else:
-                        output = await client.generate_content(
-                            prompt,
-                            files=upload_paths or None,
-                            model=model,
-                            gem=gem,
-                            temporary=temporary,
-                            extended_thinking=extended_thinking,
-                        )
-                finally:
-                    self.active_requests -= 1
+                        raise
+                    finally:
+                        self.active_requests -= 1
+                        upstream_ms = (time.perf_counter() - t_up0) * 1000.0
 
-            images_out, videos_out, media_out = await self._extract_and_save_media(
-                output, save_media=save_media
-            )
-            elapsed = round(time.perf_counter() - t0, 3)
-            cid = output.metadata[0] if output.metadata else chat_id
-            parsed_json = (
-                _extract_json_from_text(output.text) if response_format == "json" else None
-            )
-            await self._send_json(
-                writer,
-                200,
-                {
-                    "text": output.text,
-                    "json": parsed_json,
-                    "thoughts": output.thoughts,
-                    "chat_id": cid,
-                    "rcid": output.rcid,
-                    "images": images_out,
-                    "videos": videos_out,
-                    "media": media_out,
-                    "elapsed_sec": elapsed,
-                },
-            )
+                images_out, videos_out, media_out = await self._extract_and_save_media(
+                    output, save_media=save_media
+                )
+                elapsed = round(time.perf_counter() - t0, 3)
+                cid = output.metadata[0] if output.metadata else chat_id
+                parsed_json = (
+                    _extract_json_from_text(output.text) if response_format == "json" else None
+                )
+                await self._send_json(
+                    writer,
+                    200,
+                    {
+                        "text": output.text,
+                        "json": parsed_json,
+                        "thoughts": output.thoughts,
+                        "chat_id": cid,
+                        "rcid": output.rcid,
+                        "images": images_out,
+                        "videos": videos_out,
+                        "media": media_out,
+                        "elapsed_sec": elapsed,
+                    },
+                )
+                await self.monitor.on_request_done(
+                    method="POST",
+                    path="/v1/chat",
+                    status=200,
+                    total_ms=elapsed * 1000.0,
+                    queue_ms=queue_ms,
+                    upstream_ms=upstream_ms,
+                    ttft_ms=None,
+                    model=model,
+                    stream=False,
+                    files_count=len(upload_paths),
+                    concurrent=concurrent_at_start,
+                    max_concurrency=self.max_concurrency,
+                    lag_ms=self.monitor.lag_between(wall_start, time.time()),
+                    prompt_preview=prompt,
+                )
+            finally:
+                self.monitor.end_req(req_id)
         finally:
             shutil.rmtree(temp_upload_dir, ignore_errors=True)
 
@@ -2497,6 +3013,20 @@ class GeminiAPIServer:
         self._save_file_cookies(chosen_cookies)
         try:
             await self.ensure_client(force_reinit=True)
+            models_list = [m.model_name for m in (self.client.list_models() or [])] if self.client else []
+            with contextlib.suppress(RuntimeError):
+                asyncio.create_task(
+                    self.monitor.send_telegram(
+                        "\n".join(
+                            [
+                                "🔑 <b>Đã cập nhật Cookie Gemini (Auto-Fetch)</b>",
+                                f"🕒 {_vn_time()} · {_escape_html(self.monitor.server_url)}",
+                                f"Nguồn: <code>{_escape_html(chosen_source)}</code> · Trạng thái: <code>AVAILABLE</code>",
+                                f"Models: {_escape_html(', '.join(models_list) or 'default')}",
+                            ]
+                        )
+                    )
+                )
             await self._send_json(
                 writer,
                 200,
@@ -2539,16 +3069,29 @@ class GeminiAPIServer:
         self._save_file_cookies(parsed)
         try:
             await self.ensure_client(force_reinit=True)
+            models_list = [m.model_name for m in (self.client.list_models() or [])] if self.client else []
+            cookie_src = getattr(self.client, "_cookie_source", "Base Cookies")
+            with contextlib.suppress(RuntimeError):
+                asyncio.create_task(
+                    self.monitor.send_telegram(
+                        "\n".join(
+                            [
+                                "🔑 <b>Đã cập nhật Cookie Gemini (Paste)</b>",
+                                f"🕒 {_vn_time()} · {_escape_html(self.monitor.server_url)}",
+                                f"Nguồn: <code>{_escape_html(cookie_src)}</code> · Trạng thái: <code>AVAILABLE</code>",
+                                f"Models: {_escape_html(', '.join(models_list) or 'default')}",
+                            ]
+                        )
+                    )
+                )
             await self._send_json(
                 writer,
                 200,
                 {
                     "ok": True,
                     "saved_to": str(self.cookies_path.resolve()),
-                    "cookie_source": getattr(self.client, "_cookie_source", "Base Cookies"),
-                    "models": [m.model_name for m in (self.client.list_models() or [])]
-                    if self.client
-                    else [],
+                    "cookie_source": cookie_src,
+                    "models": models_list,
                 },
             )
         except Exception as e:
@@ -2577,6 +3120,48 @@ class GeminiAPIServer:
                 "ok": True,
                 "rotated": bool(new_ts),
                 "new_1psidts_prefix": (new_ts[:18] + "...") if new_ts else None,
+            },
+        )
+
+    async def _handle_monitor_test(self, writer: asyncio.StreamWriter) -> None:
+        if not self.monitor.is_configured:
+            await self._send_json(
+                writer,
+                400,
+                {
+                    "ok": False,
+                    "error": (
+                        "Chưa cấu hình TELEGRAM_BOT_TOKEN hoặc TELEGRAM_CHAT_ID trong file .env. "
+                        "Hãy điền 2 biến này vào .env rồi khởi động lại server."
+                    ),
+                },
+            )
+            return
+
+        client = self.client
+        initialized = bool(client and client._running)
+        models = [m.model_name for m in (client.list_models() or [])] if initialized and client else []
+        html = "\n".join(
+            [
+                "✅ <b>Kiểm tra kết nối Telegram Monitor (Gemini API)</b>",
+                f"🕒 {_vn_time()} · {_escape_html(self.monitor.server_url)}",
+                f"🔐 Trạng thái Cookie: <code>{_escape_html(client.account_status.name if initialized and client else 'UNINITIALIZED')}</code>",
+                f"🤖 Models khả dụng: {_escape_html(', '.join(models) or 'Chưa có')}",
+                f"⚙️ Ngưỡng cảnh báo: Chậm ≥ {_fmt_ms(self.monitor.slow_ms)} · Đứng ≥ {_fmt_ms(self.monitor.lag_ms)} · Đa luồng = {self.max_concurrency}",
+            ]
+        )
+        ok = await self.monitor.send_telegram(html)
+        await self._send_json(
+            writer,
+            200 if ok else 502,
+            {
+                "ok": ok,
+                "chat_id": self.monitor.chat_id,
+                "message": (
+                    "Đã gửi tin nhắn kiểm tra thành công tới nhóm Telegram Monitor!"
+                    if ok
+                    else "Gửi tin nhắn Telegram thất bại. Vui lòng kiểm tra lại TELEGRAM_BOT_TOKEN và TELEGRAM_CHAT_ID."
+                ),
             },
         )
 
@@ -2625,6 +3210,7 @@ async def run_api_server(
     api_key: str = os.getenv("GEMINI_API_KEY", "minhdan2k4A@123"),
     verbose: bool = False,
 ) -> None:
+    server_url = f"http://{host}:{port}"
     app = GeminiAPIServer(
         cookies_path=cookies_path,
         proxy=proxy,
@@ -2632,26 +3218,56 @@ async def run_api_server(
         auto_refresh=auto_refresh,
         api_key=api_key,
         verbose=verbose,
+        server_url=server_url,
     )
     is_local_only = host in ("127.0.0.1", "localhost", "::1")
-    print(f"🚀 Khởi động Gemini WebAPI Provider tại: http://{host}:{port}")
+    print(f"🚀 Khởi động Gemini WebAPI Provider tại: {server_url}")
     print(
         f"   - Chế độ mạng:                 "
         f"{'🔒 Localhost-Only (Chặn truy cập từ bên ngoài VPS)' if is_local_only else '🌐 Public'}"
     )
-    print(f"   - Giao diện Multimodal Studio: http://{host}:{port}/")
-    print(f"   - Tài liệu Swagger UI:         http://{host}:{port}/docs")
+    print(f"   - Giao diện Multimodal Studio: {server_url}/")
+    print(f"   - Tài liệu Swagger UI:         {server_url}/docs")
     print(f"   - Secret Key (/v1/*):          {api_key}")
     print(f"   - Concurrency Semaphore:       tối đa {max_concurrency} luồng song song")
+    if app.monitor.is_configured:
+        print(
+            f"   - Telegram Monitor:            ✅ Đã bật (Chat ID: {app.monitor.chat_id}, Slow ≥ {app.monitor.slow_ms}ms)"
+        )
+    else:
+        print(
+            "   - Telegram Monitor:            ⚪ Tắt (Chưa khai báo TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID trong .env)"
+        )
+
+    # Bắt các lỗi task ngầm không được xử lý trong asyncio loop (giống unhandledRejection bên Node)
+    loop = asyncio.get_running_loop()
+
+    def _async_exception_handler(_loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+        exc = context.get("exception") or context.get("message", "Unknown async error")
+        app.monitor.report_error(exc, "unhandledAsyncException")
+
+    loop.set_exception_handler(_async_exception_handler)
+    app.monitor.start_watchdog(app)
 
     try:
         await app.ensure_client()
-        print(
-            f"✅ Đã kết nối Gemini thành công! (Nguồn cookie: {app.client._cookie_source if app.client else 'N/A'})"
-        )
+        cookie_src = app.client._cookie_source if app.client else "N/A"
+        models_list = [m.model_name for m in (app.client.list_models() or [])] if app.client else []
+        print(f"✅ Đã kết nối Gemini thành công! (Nguồn cookie: {cookie_src})")
+        if app.monitor.is_configured:
+            await app.monitor.send_telegram(
+                "\n".join(
+                    [
+                        f"🟢 <b>Gemini API khởi động</b> · {_vn_time()}",
+                        f"🌐 Endpoint: <code>{_escape_html(server_url)}</code> · Đa luồng: {max_concurrency}",
+                        f"🔑 Nguồn Cookie: <code>{_escape_html(cookie_src)}</code> · Trạng thái: <code>AVAILABLE</code>",
+                        f"🤖 Models: {_escape_html(', '.join(models_list) or 'default')}",
+                    ]
+                )
+            )
     except Exception as e:
         print(f"⚠️  Chưa khởi tạo được GeminiClient ngay lúc bật: {e}")
-        print(f"👉 Bạn có thể mở http://{host}:{port}/ trên trình duyệt để nạp Cookie!")
+        print(f"👉 Bạn có thể mở {server_url}/ trên trình duyệt để nạp Cookie!")
 
     server = await asyncio.start_server(app.handle_request, host, port)
     async with server:

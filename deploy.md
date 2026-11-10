@@ -59,7 +59,7 @@ cd /opt/my-gemini-api
 cp .env.example .env
 ```
 
-Mặc định file `.env` đã chuẩn sẵn:
+Mặc định file `.env` đã chuẩn sẵn (điền thêm `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID` để nhận báo lỗi / cảnh báo Cookie hết hạn / request chậm về Telegram nhóm Monitor giống `exam-epu-web`):
 ```env
 GEMINI_HOST=localhost
 GEMINI_PORT=8000
@@ -67,6 +67,14 @@ GEMINI_API_KEY=minhdan2k4A@123
 GEMINI_MAX_CONCURRENCY=3
 GEMINI_COOKIES_FILE=cookies.json
 HTTPS_PROXY=
+
+# Telegram Monitor (giống exam-epu-web)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=-5280042435
+MONITOR_ENABLED=true
+MONITOR_SLOW_MS=15000
+MONITOR_LAG_MS=500
+MONITOR_DEBUG=0
 ```
 
 ---
