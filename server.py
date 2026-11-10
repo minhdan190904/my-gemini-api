@@ -40,7 +40,7 @@ from gemini_webapi.utils import (
 MEDIA_DIR = Path(__file__).resolve().parent / "media_outputs"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
-PLAYGROUND_HTML = """<!DOCTYPE html>
+PLAYGROUND_HTML = r"""<!DOCTYPE html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
