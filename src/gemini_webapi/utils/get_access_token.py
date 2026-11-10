@@ -39,7 +39,7 @@ from .decorators import (
     execute_with_retry,
     is_transient_network_error,
 )
-from .load_browser_cookies import HAS_BC3, load_browser_cookies
+from .load_browser_cookies import HAS_BC3, load_browser_cookies, load_cdp_cookies
 from .logger import logger
 from .rotate_1psidts import (
     extract_cookie_value,
@@ -356,9 +356,15 @@ async def get_access_token(
         elif verbose and not cookie_jars_to_test:
             logger.debug("Skipping loading base cookies. __Secure-1PSID is not provided.")
 
-        # Local browser cookies as the last authenticated source
+        # Local browser cookies (CDP remote debugging first, then browser-cookie3)
         try:
-            if browser_cookies := load_browser_cookies(domain_name=_DOMAIN_NAME, verbose=verbose):
+            browser_cookies: dict[str, list[dict]] = {}
+            if cdp_cookies := await load_cdp_cookies(domain_name=_DOMAIN_NAME, verbose=verbose):
+                browser_cookies["cdp"] = cdp_cookies
+            if bc3_cookies := load_browser_cookies(domain_name=_DOMAIN_NAME, verbose=verbose):
+                browser_cookies.update(bc3_cookies)
+
+            if browser_cookies:
                 for browser, cookie_list in browser_cookies.items():
                     temp_cookies = {c["name"]: c["value"] for c in cookie_list}
                     secure_1psid = temp_cookies.get(COOKIE_1PSID)

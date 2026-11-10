@@ -7,7 +7,12 @@ from .decorators import (
     running,
 )
 from .get_access_token import InitSession, get_access_token
-from .load_browser_cookies import load_browser_cookies
+from .load_browser_cookies import (
+    HAS_BC3,
+    load_browser_cookies,
+    load_cdp_cookies,
+    parse_raw_cookies,
+)
 from .logger import logger, set_log_level
 from .parsing import (
     extract_json_from_response,
@@ -21,6 +26,7 @@ from .parsing import (
 from .rotate_1psidts import (
     clear_cookies_cache,
     extract_cookie_value,
+    get_cookie_cache_dir,
     get_cookies_cache_path,
     migrate_legacy_cache,
     rotate_1psidts,

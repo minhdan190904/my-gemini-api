@@ -200,10 +200,16 @@ Network Trash Folder
 Temporary Items
 .apdisk
 
-# Temporary files
+# Temporary files & generated media outputs
 .temp/
 temp/
+media_outputs/
+uploads/
 
-# Cookies and credentials
+# Cookies and credentials (prevent accidental secret leak)
 cookies.json
+*cookies*.json
+cookies.txt
 *.cookies
+.cached_cookies_*
+gemini_cookies/
