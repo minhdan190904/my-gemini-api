@@ -19,8 +19,29 @@ from urllib.parse import urlparse
 from curl_cffi import CurlFollow, CurlHttpVersion
 
 # Run straight from a source checkout, without the package having to be installed
-if (_src := str(Path(__file__).resolve().parent / "src")) not in sys.path:
+PROJECT_ROOT = Path(__file__).resolve().parent
+if (_src := str(PROJECT_ROOT / "src")) not in sys.path:
     sys.path.insert(0, _src)
+
+
+def _load_dotenv(env_file: Path | None = None) -> None:
+    """Load environment variables from .env file in the project root."""
+    target = env_file or (PROJECT_ROOT / ".env")
+    if not target.is_file():
+        return
+    with contextlib.suppress(Exception):
+        for raw_line in target.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+_load_dotenv()
 
 from gemini_webapi import GeminiClient, logger, set_log_level
 from gemini_webapi.constants import BROWSER_TYPE, COOKIE_1PSID, COOKIE_1PSIDTS
@@ -1226,13 +1247,22 @@ def build_parser():
 
     # serve (HTTP API Server & Web Playground)
     p_srv = sub.add_parser("serve", help="Start local HTTP REST API Server & Web Playground")
-    p_srv.add_argument("--host", default="localhost", help="Bind host (default: localhost)")
-    p_srv.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    p_srv.add_argument(
+        "--host",
+        default=os.getenv("GEMINI_HOST", "localhost"),
+        help="Bind host (default: GEMINI_HOST in .env or localhost)",
+    )
+    p_srv.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("GEMINI_PORT", "8000")),
+        help="Bind port (default: GEMINI_PORT in .env or 8000)",
+    )
     p_srv.add_argument(
         "--concurrency",
         type=int,
-        default=3,
-        help="Max concurrent requests via Semaphore (default: 3)",
+        default=int(os.getenv("GEMINI_MAX_CONCURRENCY", "3")),
+        help="Max concurrent requests via Semaphore (default: GEMINI_MAX_CONCURRENCY in .env or 3)",
     )
     p_srv.add_argument(
         "--no-auto-refresh",

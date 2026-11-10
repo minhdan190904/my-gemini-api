@@ -38,8 +38,29 @@ from gemini_webapi.utils import (
     rotate_1psidts,
 )
 
-MEDIA_DIR = Path(__file__).resolve().parent / "media_outputs"
+PROJECT_ROOT = Path(__file__).resolve().parent
+MEDIA_DIR = PROJECT_ROOT / "media_outputs"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_dotenv(env_file: Path | None = None) -> None:
+    """Nạp biến môi trường từ file .env trong thư mục dự án (không cần cài thêm thư viện ngoài)."""
+    target = env_file or (PROJECT_ROOT / ".env")
+    if not target.is_file():
+        return
+    with contextlib.suppress(Exception):
+        for raw_line in target.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+_load_dotenv()
 
 PLAYGROUND_HTML = r"""<!DOCTYPE html>
 <html lang="vi">
