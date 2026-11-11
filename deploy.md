@@ -6,7 +6,7 @@ Hướng dẫn triển khai `my-gemini-api` chạy nội bộ (`localhost:8000`)
 |---|---|
 | Thư mục code | **`/opt/my-gemini-api`** |
 | Cổng chạy | **`localhost:8000`** (Chỉ nội bộ VPS gọi được, bên ngoài internet không thể truy cập) |
-| Secret Key mặc định | `minhdan2k4A@123` (Khai báo trong `/opt/my-gemini-api/.env` và `/opt/exam-epu-web/.env`) |
+| Secret Key | **Bắt buộc**, ≥ 16 ký tự, không có giá trị mặc định – cùng 1 giá trị trong `/opt/my-gemini-api/.env` và `/opt/exam-epu-web/.env` (thiếu thì server không khởi động) |
 | Quản lý tiến trình | **PM2** (`my-gemini-api`) — chỉ tốn ~35 MB RAM |
 
 ```text
@@ -59,12 +59,23 @@ cd /opt/my-gemini-api
 cp .env.example .env
 ```
 
-Mặc định file `.env` đã chuẩn sẵn (điền thêm `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID` để nhận báo lỗi / cảnh báo Cookie hết hạn / request chậm về Telegram nhóm Monitor giống `exam-epu-web`):
+Sinh khóa bí mật rồi điền vào `GEMINI_API_KEY` (dùng **cùng giá trị** cho `exam-epu-web` ở bước 5):
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Điền thêm `TELEGRAM_BOT_TOKEN` & `TELEGRAM_CHAT_ID` để nhận báo lỗi / cảnh báo Cookie hết hạn / request chậm về Telegram nhóm Monitor giống `exam-epu-web`):
 ```env
 GEMINI_HOST=localhost
 GEMINI_PORT=8000
-GEMINI_API_KEY=minhdan2k4A@123
+GEMINI_API_KEY=<khoa-bi-mat-vua-sinh>
 GEMINI_MAX_CONCURRENCY=3
+# Giới hạn request (chấm bài bằng ảnh gửi tối đa 4 ảnh)
+GEMINI_MAX_BODY_MB=20
+GEMINI_MAX_FILES=8
+GEMINI_MAX_FILE_MB=8
+GEMINI_QUEUE_TIMEOUT_MS=60000
+GEMINI_REQUEST_TIMEOUT_MS=150000
 GEMINI_COOKIES_FILE=cookies.json
 HTTPS_PROXY=
 
@@ -129,7 +140,7 @@ cat >> /opt/exam-epu-web/.env <<'EOF'
 
 # ---------- AI Provider (Gemini WebAPI nội bộ) ----------
 GEMINI_API_URL=http://localhost:8000
-GEMINI_API_KEY=minhdan2k4A@123
+GEMINI_API_KEY=<cung-khoa-voi-my-gemini-api>
 GEMINI_MODEL_QUIZ_EXPLAIN=gemini-flash
 GEMINI_MODEL_ESSAY_ASSIST=gemini-pro
 GEMINI_MODEL_DOCUMENT_PARSE=gemini-pro

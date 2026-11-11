@@ -12,6 +12,7 @@ Supports:
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import json
 import mimetypes
@@ -250,7 +251,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
       <div class="row">
         <div style="display:flex; align-items:center; gap:6px; background:#090e1a; border:1px solid var(--border); padding:4px 10px; border-radius:8px;">
           <span style="font-size:0.78rem; color:var(--muted);">🔐 Secret Key:</span>
-          <input type="password" id="apiKeyInput" value="minhdan2k4A@123" style="width:140px; margin:0; padding:4px 8px; font-size:0.8rem;" onchange="localStorage.setItem('gemini_api_key', this.value)" />
+          <input type="password" id="apiKeyInput" value="" placeholder="GEMINI_API_KEY" style="width:140px; margin:0; padding:4px 8px; font-size:0.8rem;" onchange="localStorage.setItem('gemini_api_key', this.value)" />
         </div>
         <a href="/docs" target="_blank" style="text-decoration:none;">
           <button class="purple">📘 Mở Swagger UI (/docs)</button>
@@ -480,7 +481,7 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
     if (savedKey) document.getElementById('apiKeyInput').value = savedKey;
 
     function apiHeaders(extra = {}) {
-      const key = (document.getElementById('apiKeyInput')?.value || 'minhdan2k4A@123').trim();
+      const key = (document.getElementById('apiKeyInput')?.value || '').trim();
       return {
         'Authorization': 'Bearer ' + key,
         'X-API-Key': key,
@@ -1011,6 +1012,84 @@ def _extract_json_from_text(text: str) -> Any:
     return None
 
 
+class RequestError(Exception):
+    """Lỗi do request / tải máy (trả đúng mã HTTP cho client, không báo Telegram như lỗi server)."""
+
+    def __init__(self, status: int, message: str, extra: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.extra = extra or {}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
+
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def _sniff_image(data: bytes) -> str | None:
+    """Nhận diện ảnh theo byte đầu file (không tin phần mở rộng)."""
+    if data[:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _materialize_files(
+    raw_files: Any, target_dir: Path, *, max_files: int, max_file_bytes: int
+) -> list[Path]:
+    """Ghi các file Base64 ra thư mục tạm, kiểm tra số lượng / dung lượng / ảnh hợp lệ.
+
+    Tên file được thêm tiền tố số thứ tự (01_, 02_…) để 2 file cùng tên không ghi đè nhau.
+    """
+    if not raw_files:
+        return []
+    if not isinstance(raw_files, list):
+        raise RequestError(400, "Trường 'files' phải là một mảng.")
+    items = [f for f in raw_files if isinstance(f, dict) and f.get("data")]
+    if len(items) > max_files:
+        raise RequestError(400, f"Tối đa {max_files} file mỗi request (đang gửi {len(items)}).")
+
+    paths: list[Path] = []
+    max_mb = round(max_file_bytes / 1024 / 1024, 1)
+    for idx, item in enumerate(items, start=1):
+        fname = _safe_filename(str(item.get("name") or "file.bin"))
+        raw_b64 = str(item["data"])
+        if "," in raw_b64:
+            raw_b64 = raw_b64.split(",", 1)[1]
+        raw_b64 = re.sub(r"\s+", "", raw_b64)
+        # Ước lượng trước khi giải mã để không cấp phát bộ nhớ cho file quá lớn
+        if len(raw_b64) * 3 // 4 > max_file_bytes:
+            raise RequestError(413, f"File '{fname}' vượt quá {max_mb}MB.")
+        try:
+            data = base64.b64decode(raw_b64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise RequestError(400, f"File '{fname}' không phải Base64 hợp lệ.") from e
+        if not data:
+            raise RequestError(400, f"File '{fname}' rỗng.")
+        if len(data) > max_file_bytes:
+            raise RequestError(413, f"File '{fname}' vượt quá {max_mb}MB.")
+        if Path(fname).suffix.lower() in _IMAGE_EXTS and _sniff_image(data) is None:
+            raise RequestError(400, f"File '{fname}' không phải ảnh JPG / PNG / WebP / GIF hợp lệ.")
+        fpath = target_dir / f"{idx:02d}_{fname}"
+        fpath.write_bytes(data)
+        paths.append(fpath)
+    return paths
+
+
 SWAGGER_UI_HTML = r"""<!DOCTYPE html>
 <html lang="vi">
 <head>
@@ -1046,7 +1125,7 @@ SWAGGER_UI_HTML = r"""<!DOCTYPE html>
         defaultModelsExpandDepth: 1,
         tryItOutEnabled: true,
         onComplete: () => {
-          const defaultKey = localStorage.getItem('gemini_api_key') || 'minhdan2k4A@123';
+          const defaultKey = localStorage.getItem('gemini_api_key') || '';
           ui.preauthorizeApiKey('BearerAuth', defaultKey);
           ui.preauthorizeApiKey('ApiKeyAuth', defaultKey);
         }
@@ -1065,7 +1144,7 @@ OPENAPI_SPEC: dict[str, Any] = {
         "version": "2.2.0",
         "description": (
             "Core AI Provider Server đóng gói Google Gemini Web (`gemini.google.com`) cung cấp đầy đủ các API chuẩn cho mọi Backend:\n"
-            "- 🔐 **Bảo mật bằng Secret Key (`GEMINI_API_KEY`):** Truyền qua header `Authorization: Bearer <secret_key>` hoặc `X-API-Key: <secret_key>` (Mặc định: `minhdan2k4A@123`)\n"
+            "- 🔐 **Bảo mật bằng Secret Key (`GEMINI_API_KEY`):** Truyền qua header `Authorization: Bearer <secret_key>` hoặc `X-API-Key: <secret_key>` (khai báo trong `.env`, không có giá trị mặc định)\n"
             "- 💬 **Text & Multimodal Chat (`/v1/chat`):** Chat đơn lượt/đa lượt, đính kèm Ảnh/PDF/Audio Base64, ép trả về JSON (`response_format: 'json'`), Streaming từng token (`stream: true`)\n"
             "- 🖼️ **Image Generation & Editing (`/v1/images/generations`):** Tạo ảnh AI Full-HD (Imagen / Nano Banana) hoặc sửa ảnh đính kèm\n"
             "- 🎬 **Video Generation (`/v1/videos/generations`):** Tạo video AI (Google Veo)\n"
@@ -1079,13 +1158,13 @@ OPENAPI_SPEC: dict[str, Any] = {
             "BearerAuth": {
                 "type": "http",
                 "scheme": "bearer",
-                "description": "Nhập Secret Key (mặc định: minhdan2k4A@123)",
+                "description": "Nhập Secret Key (GEMINI_API_KEY trong .env)",
             },
             "ApiKeyAuth": {
                 "type": "apiKey",
                 "in": "header",
                 "name": "X-API-Key",
-                "description": "Nhập Secret Key (mặc định: minhdan2k4A@123)",
+                "description": "Nhập Secret Key (GEMINI_API_KEY trong .env)",
             },
         }
     },
@@ -1839,10 +1918,11 @@ class TelegramMonitor:
         max_concurrency: int = 3,
         lag_ms: float = 0.0,
         prompt_preview: str | None = None,
+        purpose: str | None = None,
     ) -> None:
         if self.debug:
             print(
-                f"[monitor] {round(total_ms)}ms {method} {path} {status} · model={model or 'default'} "
+                f"[monitor] {round(total_ms)}ms {method} {path} {status} · purpose={purpose or '-'} · model={model or 'default'} "
                 f"· stream={stream} · queue={round(queue_ms)}ms · upstream={round(upstream_ms)}ms "
                 f"· ttft={round(ttft_ms) if ttft_ms else '-'}ms · files={files_count} "
                 f"· cùng lúc {concurrent} · đứng {round(lag_ms)}ms"
@@ -1869,7 +1949,8 @@ class TelegramMonitor:
             msg_lines = [
                 f"🐢 <b>Request Gemini chậm</b> · {_fmt_ms(total_ms)}",
                 f"{_escape_html(method)}{' (SSE Stream)' if stream else ''} <code>{_escape_html(path)}</code> · {status}",
-                f"🤖 Model: <code>{_escape_html(model or 'default')}</code>{f' · 📎 {files_count} file đính kèm' if files_count else ''}",
+                f"🤖 Model: <code>{_escape_html(model or 'default')}</code>{f' · 📎 {files_count} file đính kèm' if files_count else ''}"
+                + (f" · 🎯 <code>{_escape_html(purpose)}</code>" if purpose else ""),
                 f"⏱ Google Gemini: {_fmt_ms(upstream_ms)}"
                 + (f" · TTFT: {_fmt_ms(ttft_ms)}" if ttft_ms is not None else "")
                 + (f" · Chờ Semaphore: {_fmt_ms(queue_ms)}" if queue_ms >= 50 else ""),
@@ -1981,7 +2062,7 @@ class GeminiAPIServer:
         proxy: str | None = None,
         max_concurrency: int = 3,
         auto_refresh: bool = True,
-        api_key: str = "minhdan2k4A@123",
+        api_key: str = "",
         verbose: bool = False,
         server_url: str = "http://localhost:8000",
         telegram_bot_token: str | None = None,
@@ -1992,6 +2073,16 @@ class GeminiAPIServer:
         self.max_concurrency = max(1, max_concurrency)
         self.semaphore = asyncio.Semaphore(self.max_concurrency)
         self.active_requests = 0
+        # Số request đang chờ Semaphore (xếp hàng) – hiện ở /health
+        self.queued_requests = 0
+        # Giới hạn request (sửa trong .env, không cần sửa code)
+        self.max_body_bytes = max(1, _env_int("GEMINI_MAX_BODY_MB", 20)) * 1024 * 1024
+        self.max_files = max(1, _env_int("GEMINI_MAX_FILES", 8))
+        self.max_file_bytes = max(1, _env_int("GEMINI_MAX_FILE_MB", 8)) * 1024 * 1024
+        # Chờ hàng đợi quá lâu → trả 429 "busy" thay vì treo (0 = chờ mãi như trước)
+        self.queue_timeout_ms = max(0, _env_int("GEMINI_QUEUE_TIMEOUT_MS", 60_000))
+        # 1 lần gọi Gemini quá lâu → 504 và nhả luồng cho request khác (0 = không giới hạn)
+        self.request_timeout_ms = max(0, _env_int("GEMINI_REQUEST_TIMEOUT_MS", 150_000))
         self.auto_refresh = auto_refresh
         self.api_key = (api_key or "").strip()
         self.verbose = verbose
@@ -2005,8 +2096,9 @@ class GeminiAPIServer:
         )
 
     def _verify_api_key(self, headers: dict[str, str]) -> bool:
+        # Chưa cấu hình khóa → chặn hết (trước đây mở toang /v1/*)
         if not self.api_key:
-            return True
+            return False
         x_key = headers.get("x-api-key", "").strip()
         if x_key and x_key == self.api_key:
             return True
@@ -2018,6 +2110,38 @@ class GeminiAPIServer:
         elif auth == self.api_key:
             return True
         return False
+
+    @contextlib.asynccontextmanager
+    async def _acquire_slot(self, queue_timeout_ms: int | None = None):
+        """Giữ 1 luồng Semaphore; chờ quá `queue_timeout_ms` → RequestError 429 (busy)."""
+        timeout_ms = self.queue_timeout_ms if queue_timeout_ms is None else max(0, queue_timeout_ms)
+        self.queued_requests += 1
+        try:
+            if timeout_ms > 0:
+                await asyncio.wait_for(self.semaphore.acquire(), timeout_ms / 1000.0)
+            else:
+                await self.semaphore.acquire()
+        except TimeoutError as e:
+            raise RequestError(
+                429,
+                "Máy chủ AI đang bận (hàng đợi đầy). Vui lòng thử lại sau ít giây.",
+                {
+                    "error_code": "busy",
+                    "retry_after": 10,
+                    "active_requests": self.active_requests,
+                    "queued_requests": self.queued_requests - 1,
+                },
+            ) from e
+        finally:
+            self.queued_requests -= 1
+        try:
+            yield
+        finally:
+            self.semaphore.release()
+
+    def _upstream_timeout(self):
+        """Giới hạn thời gian 1 lần gọi Gemini (0 = không giới hạn)."""
+        return asyncio.timeout(self.request_timeout_ms / 1000.0 if self.request_timeout_ms > 0 else None)
 
     def _load_file_cookies(self) -> dict[str, str]:
         if not self.cookies_path.is_file():
@@ -2121,7 +2245,22 @@ class GeminiAPIServer:
                     k, v = decoded.split(":", 1)
                     headers[k.strip().lower()] = v.strip()
 
-            content_length = int(headers.get("content-length", "0"))
+            try:
+                content_length = int(headers.get("content-length", "0") or "0")
+            except ValueError:
+                content_length = 0
+            # Chặn body quá lớn TRƯỚC khi đọc vào RAM
+            if content_length > self.max_body_bytes:
+                await self._send_json(
+                    writer,
+                    413,
+                    {
+                        "error": f"Request quá lớn ({round(content_length / 1024 / 1024, 1)}MB), tối đa "
+                        f"{self.max_body_bytes // 1024 // 1024}MB (GEMINI_MAX_BODY_MB).",
+                        "error_code": "too_large",
+                    },
+                )
+                return
             body_bytes = b""
             if content_length > 0:
                 body_bytes = await asyncio.wait_for(
@@ -2183,6 +2322,12 @@ class GeminiAPIServer:
             if body_bytes:
                 with contextlib.suppress(Exception):
                     body_json = json.loads(body_bytes.decode("utf-8"))
+            if not isinstance(body_json, dict):
+                body_json = {}
+            # Tính năng gọi tới (vd essayAssist, quizExplain) – chỉ để ghi log / Telegram Monitor
+            purpose = re.sub(r"[^a-zA-Z0-9_.-]", "", headers.get("x-purpose", ""))[:40]
+            if purpose:
+                body_json["_purpose"] = purpose
 
             if method == "POST" and path == "/v1/chat":
                 await self._handle_chat(writer, body_json)
@@ -2233,6 +2378,10 @@ class GeminiAPIServer:
                 return
 
             await self._send_json(writer, 404, {"error": f"Not found: {method} {path}"})
+        except RequestError as e:
+            # Lỗi do request / máy bận: trả đúng mã HTTP, không báo Telegram như lỗi server
+            with contextlib.suppress(Exception):
+                await self._send_json(writer, e.status, {"error": e.message, **e.extra})
         except Exception as e:
             logger.debug(f"Server request error: {e}")
             req_label = f"{locals().get('method', 'REQ')} {locals().get('path', '/')}"
@@ -2301,6 +2450,14 @@ class GeminiAPIServer:
                 "cache_file": cache_path,
                 "max_concurrency": self.max_concurrency,
                 "active_requests": self.active_requests,
+                "queued_requests": self.queued_requests,
+                "limits": {
+                    "max_body_mb": self.max_body_bytes // 1024 // 1024,
+                    "max_files": self.max_files,
+                    "max_file_mb": self.max_file_bytes // 1024 // 1024,
+                    "queue_timeout_ms": self.queue_timeout_ms,
+                    "request_timeout_ms": self.request_timeout_ms,
+                },
                 "telegram_configured": self.monitor.is_configured,
                 "telegram_chat_id": self.monitor.chat_id if self.monitor.is_configured else None,
                 "monitor_enabled": self.monitor.enabled,
@@ -2501,20 +2658,23 @@ class GeminiAPIServer:
         extended_thinking = bool(body.get("extended_thinking", False))
         save_media = bool(body.get("save_media", True))
         raw_files = body.get("files") or []
+        purpose = str(body.get("_purpose") or "") or None
+        # Request có thể tự đặt thời gian chờ hàng đợi riêng (ms), mặc định theo GEMINI_QUEUE_TIMEOUT_MS
+        queue_timeout_ms: int | None = None
+        with contextlib.suppress(TypeError, ValueError):
+            if body.get("queue_timeout_ms") is not None:
+                queue_timeout_ms = min(600_000, max(0, int(body["queue_timeout_ms"])))
 
-        # Materialize uploaded Base64 files into a temporary directory so filenames are preserved
+        # Ghi file Base64 ra thư mục tạm (kiểm tra số lượng / dung lượng / ảnh hợp lệ, tên không trùng)
         temp_upload_dir = Path(tempfile.mkdtemp(prefix="gemini_upload_"))
         upload_paths: list[Path] = []
         try:
-            for item in raw_files:
-                if isinstance(item, dict) and item.get("data"):
-                    fname = _safe_filename(str(item.get("name") or "file.bin"))
-                    raw_b64 = str(item["data"])
-                    if "," in raw_b64:
-                        raw_b64 = raw_b64.split(",", 1)[1]
-                    fpath = temp_upload_dir / fname
-                    fpath.write_bytes(base64.b64decode(raw_b64))
-                    upload_paths.append(fpath)
+            upload_paths = _materialize_files(
+                raw_files,
+                temp_upload_dir,
+                max_files=self.max_files,
+                max_file_bytes=self.max_file_bytes,
+            )
 
             client = await self.ensure_client()
             t0 = time.perf_counter()
@@ -2531,7 +2691,7 @@ class GeminiAPIServer:
                     upstream_ms = 0.0
                     try:
                         t_q0 = time.perf_counter()
-                        async with self.semaphore:
+                        async with self._acquire_slot(queue_timeout_ms):
                             queue_ms = (time.perf_counter() - t_q0) * 1000.0
                             t_up0 = time.perf_counter()
                             self.active_requests += 1
@@ -2564,19 +2724,31 @@ class GeminiAPIServer:
                                         extended_thinking=extended_thinking,
                                     )
 
-                                async for chunk in stream_gen:
-                                    output = chunk
-                                    if chunk.text_delta or chunk.thoughts_delta:
-                                        if ttft is None:
-                                            ttft = round(time.perf_counter() - t0, 3)
-                                        await self._send_sse_event(
-                                            writer,
-                                            {
-                                                "type": "delta",
-                                                "text_delta": chunk.text_delta,
-                                                "thoughts_delta": chunk.thoughts_delta,
-                                            },
-                                        )
+                                async def _pump() -> None:
+                                    nonlocal output, ttft
+                                    async for chunk in stream_gen:
+                                        output = chunk
+                                        if chunk.text_delta or chunk.thoughts_delta:
+                                            if ttft is None:
+                                                ttft = round(time.perf_counter() - t0, 3)
+                                            await self._send_sse_event(
+                                                writer,
+                                                {
+                                                    "type": "delta",
+                                                    "text_delta": chunk.text_delta,
+                                                    "thoughts_delta": chunk.thoughts_delta,
+                                                },
+                                            )
+
+                                try:
+                                    async with self._upstream_timeout():
+                                        await _pump()
+                                except TimeoutError as e:
+                                    raise RequestError(
+                                        504,
+                                        f"Gemini không phản hồi sau {self.request_timeout_ms // 1000} giây.",
+                                        {"error_code": "timeout"},
+                                    ) from e
                             finally:
                                 self.active_requests -= 1
                                 upstream_ms = (time.perf_counter() - t_up0) * 1000.0
@@ -2625,6 +2797,18 @@ class GeminiAPIServer:
                             max_concurrency=self.max_concurrency,
                             lag_ms=self.monitor.lag_between(wall_start, time.time()),
                             prompt_preview=prompt,
+                            purpose=purpose,
+                        )
+                    except RequestError as e:
+                        # Máy bận (429) không phải lỗi server → không báo Telegram; quá giờ (504) vẫn báo
+                        if e.status >= 500:
+                            self.monitor.report_error(
+                                e,
+                                "POST /v1/chat (SSE Stream)",
+                                {"Model": model or "default", "Mục đích": purpose or "-", "Files": str(len(upload_paths))},
+                            )
+                        await self._send_sse_event(
+                            writer, {"type": "error", "status": e.status, "error": e.message, **e.extra}
                         )
                     except Exception as e:
                         self.monitor.report_error(
@@ -2632,6 +2816,7 @@ class GeminiAPIServer:
                             "POST /v1/chat (SSE Stream)",
                             {
                                 "Model": model or "default",
+                                "Mục đích": purpose or "-",
                                 "Files": str(len(upload_paths)),
                                 "Đang chạy": f"{self.active_requests}/{self.max_concurrency}",
                                 "Prompt": " ".join(prompt.split())[:160],
@@ -2641,44 +2826,58 @@ class GeminiAPIServer:
                     return
 
                 t_q0 = time.perf_counter()
-                async with self.semaphore:
+                async with self._acquire_slot(queue_timeout_ms):
                     queue_ms = (time.perf_counter() - t_q0) * 1000.0
                     t_up0 = time.perf_counter()
                     self.active_requests += 1
                     try:
-                        if chat_id:
-                            latest = await client.fetch_latest_chat_response(chat_id)
-                            if latest:
-                                chat = client.start_chat(
-                                    metadata=list(latest.metadata),
-                                    cid=chat_id,
-                                    rcid=latest.rcid,
-                                    model=model,
-                                    gem=gem,
+                        async with self._upstream_timeout():
+                            if chat_id:
+                                latest = await client.fetch_latest_chat_response(chat_id)
+                                if latest:
+                                    chat = client.start_chat(
+                                        metadata=list(latest.metadata),
+                                        cid=chat_id,
+                                        rcid=latest.rcid,
+                                        model=model,
+                                        gem=gem,
+                                    )
+                                else:
+                                    chat = client.start_chat(cid=chat_id, model=model, gem=gem)
+                                output = await chat.send_message(
+                                    prompt,
+                                    files=upload_paths or None,
+                                    temporary=temporary,
+                                    extended_thinking=extended_thinking,
                                 )
                             else:
-                                chat = client.start_chat(cid=chat_id, model=model, gem=gem)
-                            output = await chat.send_message(
-                                prompt,
-                                files=upload_paths or None,
-                                temporary=temporary,
-                                extended_thinking=extended_thinking,
-                            )
-                        else:
-                            output = await client.generate_content(
-                                prompt,
-                                files=upload_paths or None,
-                                model=model,
-                                gem=gem,
-                                temporary=temporary,
-                                extended_thinking=extended_thinking,
-                            )
+                                output = await client.generate_content(
+                                    prompt,
+                                    files=upload_paths or None,
+                                    model=model,
+                                    gem=gem,
+                                    temporary=temporary,
+                                    extended_thinking=extended_thinking,
+                                )
+                    except TimeoutError as e:
+                        err = RequestError(
+                            504,
+                            f"Gemini không phản hồi sau {self.request_timeout_ms // 1000} giây.",
+                            {"error_code": "timeout"},
+                        )
+                        self.monitor.report_error(
+                            err,
+                            "POST /v1/chat",
+                            {"Model": model or "default", "Mục đích": purpose or "-", "Files": str(len(upload_paths))},
+                        )
+                        raise err from e
                     except Exception as e:
                         self.monitor.report_error(
                             e,
                             "POST /v1/chat",
                             {
                                 "Model": model or "default",
+                                "Mục đích": purpose or "-",
                                 "Files": str(len(upload_paths)),
                                 "Đang chạy": f"{self.active_requests}/{self.max_concurrency}",
                                 "Prompt": " ".join(prompt.split())[:160],
@@ -2727,6 +2926,7 @@ class GeminiAPIServer:
                     max_concurrency=self.max_concurrency,
                     lag_ms=self.monitor.lag_between(wall_start, time.time()),
                     prompt_preview=prompt,
+                    purpose=purpose,
                 )
             finally:
                 self.monitor.end_req(req_id)
@@ -2832,36 +3032,40 @@ class GeminiAPIServer:
 
         if stream:
             await self._send_sse_headers(writer)
-            async with self.semaphore:
+            async def _pump() -> None:
+                async for chunk in client.generate_content_stream(
+                    prompt,
+                    model=model,
+                    temporary=bool(body.get("temporary", True)),
+                ):
+                    if chunk.text_delta or chunk.thoughts_delta:
+                        delta_obj: dict[str, Any] = {}
+                        if chunk.text_delta:
+                            delta_obj["content"] = chunk.text_delta
+                        if chunk.thoughts_delta:
+                            delta_obj["reasoning_content"] = chunk.thoughts_delta
+                        await self._send_sse_event(
+                            writer,
+                            {
+                                "id": f"chatcmpl-{chunk.rcid or now_ts}",
+                                "object": "chat.completion.chunk",
+                                "created": now_ts,
+                                "model": model or "gemini-default",
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": delta_obj,
+                                        "finish_reason": None,
+                                    }
+                                ],
+                            },
+                        )
+
+            async with self._acquire_slot():
                 self.active_requests += 1
                 try:
-                    async for chunk in client.generate_content_stream(
-                        prompt,
-                        model=model,
-                        temporary=bool(body.get("temporary", True)),
-                    ):
-                        if chunk.text_delta or chunk.thoughts_delta:
-                            delta_obj: dict[str, Any] = {}
-                            if chunk.text_delta:
-                                delta_obj["content"] = chunk.text_delta
-                            if chunk.thoughts_delta:
-                                delta_obj["reasoning_content"] = chunk.thoughts_delta
-                            await self._send_sse_event(
-                                writer,
-                                {
-                                    "id": f"chatcmpl-{chunk.rcid or now_ts}",
-                                    "object": "chat.completion.chunk",
-                                    "created": now_ts,
-                                    "model": model or "gemini-default",
-                                    "choices": [
-                                        {
-                                            "index": 0,
-                                            "delta": delta_obj,
-                                            "finish_reason": None,
-                                        }
-                                    ],
-                                },
-                            )
+                    async with self._upstream_timeout():
+                        await _pump()
                 finally:
                     self.active_requests -= 1
             await self._send_sse_event(
@@ -2878,14 +3082,21 @@ class GeminiAPIServer:
             await writer.drain()
             return
 
-        async with self.semaphore:
+        async with self._acquire_slot():
             self.active_requests += 1
             try:
-                output = await client.generate_content(
-                    prompt,
-                    model=model,
-                    temporary=bool(body.get("temporary", True)),
-                )
+                async with self._upstream_timeout():
+                    output = await client.generate_content(
+                        prompt,
+                        model=model,
+                        temporary=bool(body.get("temporary", True)),
+                    )
+            except TimeoutError as e:
+                raise RequestError(
+                    504,
+                    f"Gemini không phản hồi sau {self.request_timeout_ms // 1000} giây.",
+                    {"error_code": "timeout"},
+                ) from e
             finally:
                 self.active_requests -= 1
 
@@ -3174,7 +3385,12 @@ class GeminiAPIServer:
             400: "Bad Request",
             401: "Unauthorized",
             404: "Not Found",
+            413: "Payload Too Large",
+            429: "Too Many Requests",
             500: "Internal Server Error",
+            502: "Bad Gateway",
+            503: "Service Unavailable",
+            504: "Gateway Timeout",
         }.get(status, "OK")
         header = (
             f"HTTP/1.1 {status} {status_text}\r\n"
@@ -3205,11 +3421,18 @@ async def run_api_server(
     port: int = int(os.getenv("GEMINI_PORT", "8000")),
     cookies_path: str | Path = "cookies.json",
     proxy: str | None = None,
-    max_concurrency: int = 3,
+    max_concurrency: int = _env_int("GEMINI_MAX_CONCURRENCY", 3),
     auto_refresh: bool = True,
-    api_key: str = os.getenv("GEMINI_API_KEY", "minhdan2k4A@123"),
+    api_key: str = os.getenv("GEMINI_API_KEY", ""),
     verbose: bool = False,
 ) -> None:
+    api_key = (api_key or "").strip()
+    # Không có khóa = ai cũng gọi được /v1/* → không cho khởi động
+    if len(api_key) < 16:
+        raise SystemExit(
+            "❌ Thiếu hoặc quá ngắn GEMINI_API_KEY (cần ≥ 16 ký tự). "
+            "Đặt trong .env, vd: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+        )
     server_url = f"http://{host}:{port}"
     app = GeminiAPIServer(
         cookies_path=cookies_path,
@@ -3228,7 +3451,7 @@ async def run_api_server(
     )
     print(f"   - Giao diện Multimodal Studio: {server_url}/")
     print(f"   - Tài liệu Swagger UI:         {server_url}/docs")
-    print(f"   - Secret Key (/v1/*):          {api_key}")
+    print(f"   - Secret Key (/v1/*):          ****{api_key[-4:]} (GEMINI_API_KEY)")
     print(f"   - Concurrency Semaphore:       tối đa {max_concurrency} luồng song song")
     if app.monitor.is_configured:
         print(
