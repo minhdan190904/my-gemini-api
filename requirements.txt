@@ -1,5 +1,5 @@
 curl-cffi~=0.16.3
 loguru~=0.7.3
-orjson~=3.11.9
+orjson>=3.11.9,<3.14.0
 pydantic~=2.12.5
 browser-cookie3>=0.20.1
