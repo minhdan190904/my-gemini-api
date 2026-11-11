@@ -3428,9 +3428,9 @@ async def run_api_server(
 ) -> None:
     api_key = (api_key or "").strip()
     # Không có khóa = ai cũng gọi được /v1/* → không cho khởi động
-    if len(api_key) < 16:
+    if len(api_key) <= 10:
         raise SystemExit(
-            "❌ Thiếu hoặc quá ngắn GEMINI_API_KEY (cần ≥ 16 ký tự). "
+            "❌ Thiếu hoặc quá ngắn GEMINI_API_KEY (cần dài hơn 10 ký tự). "
             "Đặt trong .env, vd: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
         )
     server_url = f"http://{host}:{port}"

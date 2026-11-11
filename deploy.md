@@ -6,7 +6,7 @@ Hướng dẫn triển khai `my-gemini-api` chạy nội bộ (`localhost:8000`)
 |---|---|
 | Thư mục code | **`/opt/my-gemini-api`** |
 | Cổng chạy | **`localhost:8000`** (Chỉ nội bộ VPS gọi được, bên ngoài internet không thể truy cập) |
-| Secret Key | **Bắt buộc**, ≥ 16 ký tự, không có giá trị mặc định – cùng 1 giá trị trong `/opt/my-gemini-api/.env` và `/opt/exam-epu-web/.env` (thiếu thì server không khởi động) |
+| Secret Key | **Bắt buộc**, dài hơn 10 ký tự, không có giá trị mặc định – cùng 1 giá trị trong `/opt/my-gemini-api/.env` và `/opt/exam-epu-web/.env` (thiếu thì server không khởi động) |
 | Quản lý tiến trình | **PM2** (`my-gemini-api`) — chỉ tốn ~35 MB RAM |
 
 ```text

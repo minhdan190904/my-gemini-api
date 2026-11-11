@@ -1272,7 +1272,7 @@ def build_parser():
     p_srv.add_argument(
         "--api-key",
         default=os.getenv("GEMINI_API_KEY", ""),
-        help="Secret API key required for /v1/* endpoints (default: GEMINI_API_KEY in .env, bắt buộc ≥ 16 ký tự)",
+        help="Secret API key required for /v1/* endpoints (default: GEMINI_API_KEY in .env, bắt buộc dài hơn 10 ký tự)",
     )
 
     return parser
