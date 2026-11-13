@@ -512,7 +512,13 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 # Check for server-side rejection (e.g., code 7 for permission denied)
                 reject_code = get_nested_value(part, [5, 0])
                 if reject_code == 7:
-                    self.account_status = AccountStatus.UNAUTHENTICATED
+                    # Only GET_USER_STATUS decides the account status. Other RPCs (usage info,
+                    # quota, abuse status - usage info runs after EVERY generation) can be denied
+                    # on their own for a perfectly valid session; flipping the global status here
+                    # made every later request with files / gems fail with "UNAUTHENTICATED"
+                    # while plain text requests kept working.
+                    if target_id == GRPC.GET_USER_STATUS:
+                        self.account_status = AccountStatus.UNAUTHENTICATED
                     logger.warning(
                         f"RPC request {target_id} failed: Permission denied or unauthenticated."
                     )
@@ -1124,6 +1130,17 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             f"(in {hours}h {seconds // 60}m)."
         )
 
+    async def _ensure_account_available(self) -> None:
+        """Like `_check_account_status(raise_error=True)`, but re-asks Google once when the
+        cached status is not AVAILABLE (it is set at init and may be stale), so a session that
+        is actually fine is not refused."""
+        if self.account_status != AccountStatus.AVAILABLE:
+            try:
+                await self._fetch_user_status()
+            except Exception as e:
+                logger.debug(f"Failed to re-check account status: {e}")
+        self._check_account_status(raise_error=True)
+
     def _check_account_status(self, raise_error: bool = False) -> bool:
         """Check if the account is available for higher-level operations.
 
@@ -1214,7 +1231,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             await self.reset_close_task()
 
         if any([files, gem, deep_research]):
-            self._check_account_status(raise_error=True)
+            await self._ensure_account_available()
 
         file_data = None
         if files:
@@ -1333,7 +1350,7 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             await self.reset_close_task()
 
         if any([files, gem, deep_research]):
-            self._check_account_status(raise_error=True)
+            await self._ensure_account_available()
 
         file_data = None
         if files:

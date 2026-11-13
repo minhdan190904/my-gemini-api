@@ -2378,6 +2378,9 @@ class GeminiAPIServer:
                 return
 
             await self._send_json(writer, 404, {"error": f"Not found: {method} {path}"})
+        except (ConnectionResetError, BrokenPipeError):
+            # Client đã ngắt kết nối → không còn ai nhận trả lời, không phải lỗi server
+            logger.info("Client ngắt kết nối trước khi nhận xong phản hồi")
         except RequestError as e:
             # Lỗi do request / máy bận: trả đúng mã HTTP, không báo Telegram như lỗi server
             with contextlib.suppress(Exception):
@@ -2799,6 +2802,11 @@ class GeminiAPIServer:
                             prompt_preview=prompt,
                             purpose=purpose,
                         )
+                    except (ConnectionResetError, BrokenPipeError):
+                        # Phía gọi (web) đã ngắt kết nối giữa chừng (người dùng đóng / chuyển câu, client hết giờ chờ).
+                        # Không phải lỗi server → không báo Telegram, cũng không gửi thêm sự kiện lỗi vào socket đã chết.
+                        logger.info(f"/v1/chat SSE: client ngắt kết nối giữa chừng (mục đích: {purpose or '-'})")
+                        return
                     except RequestError as e:
                         # Máy bận (429) không phải lỗi server → không báo Telegram; quá giờ (504) vẫn báo
                         if e.status >= 500:
