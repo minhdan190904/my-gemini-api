@@ -92,19 +92,20 @@ MONITOR_DEBUG=0
 
 ## 3. Nạp Cookie (`cookies.json`) lên VPS (1 trong 2 cách)
 
-### Cách A: Copy nội dung `cookies.json` từ máy tính của bạn dán thẳng lên VPS
-Chạy trên VPS:
+> ⚠️ **Từ 2026-11-21 Google KHÔNG nhận phiên chỉ với `__Secure-1PSID` + `__Secure-1PSIDTS`** (bị chuyển sang trang đăng nhập → chạy chế độ khách, request có ảnh lỗi `UNAUTHENTICATED`). Đo thật: tối thiểu phải có **`__Secure-1PSID`, `__Secure-1PSIDTS`, `SID`, `OSID`**. Luôn chép **NGUYÊN dòng cookie**:
+> 1. Mở **cửa sổ ẩn danh**, đăng nhập tài khoản dành riêng cho server, vào https://gemini.google.com và gửi 1 câu.
+> 2. F12 → **Network** → bấm 1 request bất kỳ tới `gemini.google.com` → **Request Headers** → chép cả dòng **`cookie:`**.
+> 3. Đóng cửa sổ, **không bấm Đăng xuất**. Không đăng nhập tài khoản này ở trình duyệt khác.
+
+### Cách A: Dán nguyên dòng cookie bằng CLI trên VPS (khuyên dùng)
 ```bash
-cat > /opt/my-gemini-api/cookies.json <<'EOF'
-{
-  "cookies": {
-    "__Secure-1PSID": "DÁN_GIÁ_TRỊ_1PSID_CỦA_BẠN_VÀO_ĐÂY",
-    "__Secure-1PSIDTS": "DÁN_GIÁ_TRỊ_1PSIDTS_CỦA_BẠN_VÀO_ĐÂY"
-  }
-}
-EOF
-chmod 600 /opt/my-gemini-api/cookies.json
+cd /opt/my-gemini-api
+.venv/bin/python cli.py cookies paste --raw 'DÁN_NGUYÊN_DÒNG_COOKIE_VÀO_ĐÂY'
+chmod 600 cookies.json
+pm2 restart my-gemini-api --update-env
+curl -s http://127.0.0.1:8000/health | grep -o '"account_status": *"[A-Z_]*"'   # phải ra "AVAILABLE"
 ```
+Thiếu `SID` / `OSID` thì lệnh báo lỗi và không lưu; cookie đã bị thu hồi thì báo trạng thái `UNAUTHENTICATED`.
 
 ### Cách B: Mở giao diện Web Studio (`http://localhost:8000`) qua SSH Tunnel
 Khi server đã chạy ở Bước 4, trên máy Windows của bạn mở PowerShell gõ:
@@ -170,4 +171,4 @@ bash /opt/my-gemini-api/scripts/deploy.sh
 | Xem log của Gemini API | `pm2 logs my-gemini-api --lines 100` |
 | Khởi động lại Gemini API | `pm2 restart my-gemini-api --update-env` |
 | Kiểm tra trạng thái Cookie từ CLI | `cd /opt/my-gemini-api && .venv/bin/python cli.py cookies status` |
-| Dán Cookie mới nhanh từ CLI | `cd /opt/my-gemini-api && .venv/bin/python cli.py cookies paste --raw "__Secure-1PSID=...; __Secure-1PSIDTS=..."` |
+| Dán Cookie mới nhanh từ CLI (NGUYÊN dòng cookie, cần có SID + OSID) | `cd /opt/my-gemini-api && .venv/bin/python cli.py cookies paste --raw '<cả dòng cookie:>'` |

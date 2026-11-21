@@ -58,6 +58,25 @@ COOKIE_CACHE_PREFIX = ".cached_cookies_"
 COOKIE_CACHE_EXTENSION = ".json"
 COOKIE_1PSID = "__Secure-1PSID"
 COOKIE_1PSIDTS = "__Secure-1PSIDTS"
+# Đo thật 2026-11-21: Google không còn nhận phiên chỉ với 1PSID + 1PSIDTS (bị chuyển sang trang đăng nhập).
+# Bộ tối thiểu để account_status = AVAILABLE là 1PSID + 1PSIDTS + SID + OSID → luôn giữ / lưu đủ các cookie này.
+COOKIE_SID = "SID"
+COOKIE_OSID = "OSID"
+REQUIRED_AUTH_COOKIES = (COOKIE_1PSID, COOKIE_1PSIDTS, COOKIE_SID, COOKIE_OSID)
+
+
+def session_cookies(cookies: dict[str, str]) -> dict[str, str]:
+    """Giữ các cookie phiên Google (bỏ cookie thống kê _ga* / _gcl* và *PSIDRTS gắn với trình duyệt)."""
+    return {
+        k: v
+        for k, v in cookies.items()
+        if v and not k.startswith(("_ga", "_gcl")) and not k.endswith("PSIDRTS")
+    }
+
+
+def missing_auth_cookies(cookies: dict[str, str]) -> list[str]:
+    """Tên các cookie bắt buộc còn thiếu (rỗng = đủ)."""
+    return [k for k in REQUIRED_AUTH_COOKIES if not cookies.get(k)]
 
 # Gemini Flash Quota: Targeted at Gemini Flash & Flash Lite models
 GEMINI_FLASH_QUOTA_PAYLOAD = "[[[1,11],[2,11],[6,11]]]"

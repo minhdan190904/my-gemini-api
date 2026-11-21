@@ -44,7 +44,13 @@ def _load_dotenv(env_file: Path | None = None) -> None:
 _load_dotenv()
 
 from gemini_webapi import GeminiClient, logger, set_log_level
-from gemini_webapi.constants import BROWSER_TYPE, COOKIE_1PSID, COOKIE_1PSIDTS
+from gemini_webapi.constants import (
+    BROWSER_TYPE,
+    COOKIE_1PSID,
+    COOKIE_1PSIDTS,
+    missing_auth_cookies,
+    session_cookies,
+)
 from gemini_webapi.exceptions import AuthError
 from gemini_webapi.types.image import GeneratedImage, WebImage
 from gemini_webapi.utils import (
@@ -651,17 +657,10 @@ async def cmd_cookies_fetch(args):
 
     if browser in ("auto", "cdp"):
         cdp_list = await load_cdp_cookies(domain_name="google.com", port=cdp_port, verbose=True)
-        c_map = {c["name"]: c["value"] for c in cdp_list}
+        # Giữ đủ cookie phiên (SID, OSID…): chỉ 1PSID + 1PSIDTS thì Google bắt đăng nhập lại
+        c_map = session_cookies({c["name"]: c["value"] for c in cdp_list})
         if COOKIE_1PSID in c_map:
-            candidates.append(
-                (
-                    f"CDP (port {cdp_port})",
-                    {
-                        COOKIE_1PSID: c_map[COOKIE_1PSID],
-                        COOKIE_1PSIDTS: c_map.get(COOKIE_1PSIDTS, ""),
-                    },
-                )
-            )
+            candidates.append((f"CDP (port {cdp_port})", c_map))
 
     if browser != "cdp":
         b_filter = None if browser == "auto" else [browser]
@@ -669,17 +668,9 @@ async def cmd_cookies_fetch(args):
             domain_name="google.com", verbose=args.verbose, browsers=b_filter
         )
         for b_name, c_list in bc3_map.items():
-            c_map = {c["name"]: c["value"] for c in c_list}
+            c_map = session_cookies({c["name"]: c["value"] for c in c_list})
             if COOKIE_1PSID in c_map:
-                candidates.append(
-                    (
-                        f"Browser ({b_name})",
-                        {
-                            COOKIE_1PSID: c_map[COOKIE_1PSID],
-                            COOKIE_1PSIDTS: c_map.get(COOKIE_1PSIDTS, ""),
-                        },
-                    )
-                )
+                candidates.append((f"Browser ({b_name})", c_map))
 
     if not candidates:
         print(
@@ -699,20 +690,26 @@ async def cmd_cookies_fetch(args):
             return 0
 
         print(f"  -> Đang kiểm tra xác thực với Gemini từ {source_name}...")
+        if missing := missing_auth_cookies(c_dict):
+            print(f"  ⚠️ Nguồn {source_name} thiếu cookie {', '.join(missing)} – bỏ qua.")
+            continue
         client = GeminiClient(
             secure_1psid=c_dict[COOKIE_1PSID],
             secure_1psidts=c_dict.get(COOKIE_1PSIDTS) or None,
             proxy=args.proxy,
             verify=not args.skip_verify,
         )
+        client.cookies = {k: v for k, v in c_dict.items() if k not in (COOKIE_1PSID, COOKIE_1PSIDTS)}
         try:
             await client.init(timeout=60, auto_refresh=False, verbose=args.verbose)
+            if client.account_status.name != "AVAILABLE":
+                raise RuntimeError(f"Google không nhận đăng nhập (trạng thái {client.account_status.name})")
             active_psid = extract_cookie_value(client.cookies, COOKIE_1PSID) or c_dict[COOKIE_1PSID]
             active_ts = extract_cookie_value(client.cookies, COOKIE_1PSIDTS) or c_dict.get(
                 COOKIE_1PSIDTS, ""
             )
             saved = _save_cookie_file(
-                save_path, {COOKIE_1PSID: active_psid, COOKIE_1PSIDTS: active_ts}
+                save_path, {**c_dict, COOKIE_1PSID: active_psid, COOKIE_1PSIDTS: active_ts}
             )
             models = [m.model_name for m in (client.list_models() or [])]
             print(f"✅ Xác thực thành công từ {source_name}!")
@@ -806,23 +803,25 @@ async def cmd_cookies_login(args):
                 return 1
 
             cdp_cookies = await load_cdp_cookies(domain_name="google.com", port=port, verbose=False)
-            c_map = {c["name"]: c["value"] for c in cdp_cookies}
+            c_map = session_cookies({c["name"]: c["value"] for c in cdp_cookies})
             psid = c_map.get(COOKIE_1PSID)
             psidts = c_map.get(COOKIE_1PSIDTS, "")
 
-            if psid and psidts:
-                print("🎯 Đã phát hiện __Secure-1PSID & __Secure-1PSIDTS! Đang xác thực với Gemini...")
+            # Chờ đủ 1PSID + 1PSIDTS + SID + OSID (thiếu SID / OSID là Google bắt đăng nhập lại)
+            if not missing_auth_cookies(c_map):
+                print("🎯 Đã có đủ cookie đăng nhập! Đang xác thực với Gemini...")
                 client = GeminiClient(
                     secure_1psid=psid,
                     secure_1psidts=psidts,
                     proxy=args.proxy,
                     verify=not args.skip_verify,
                 )
+                client.cookies = {k: v for k, v in c_map.items() if k not in (COOKIE_1PSID, COOKIE_1PSIDTS)}
                 try:
                     await client.init(timeout=45, auto_refresh=False, verbose=args.verbose)
-                    saved = _save_cookie_file(
-                        save_path, {COOKIE_1PSID: psid, COOKIE_1PSIDTS: psidts}
-                    )
+                    if client.account_status.name != "AVAILABLE":
+                        raise RuntimeError(client.account_status.name)
+                    saved = _save_cookie_file(save_path, c_map)
                     models = [m.model_name for m in (client.list_models() or [])]
                     print(f"✅ Đăng nhập & Auto-Fetch thành công!")
                     print(f"   - File đã lưu: {saved}")
@@ -852,10 +851,11 @@ async def cmd_cookies_paste(args):
     elif Path(raw).is_file():
         raw = Path(raw).read_text(encoding="utf-8")
 
-    parsed = parse_raw_cookies(raw)
-    if COOKIE_1PSID not in parsed:
+    parsed = session_cookies(parse_raw_cookies(raw))
+    if missing := missing_auth_cookies(parsed):
         raise SystemExit(
-            f"❌ Không tìm thấy {COOKIE_1PSID} trong dữ liệu đã nhập. Các khóa tìm thấy: {list(parsed.keys())}"
+            f"❌ Thiếu cookie: {', '.join(missing)}. Hãy dán NGUYÊN dòng cookie (F12 → Network → 1 request tới "
+            f"gemini.google.com → Request Headers → dòng 'cookie:'). Các khóa tìm thấy: {list(parsed.keys())}"
         )
 
     saved = _save_cookie_file(save_path, parsed)
@@ -867,6 +867,9 @@ async def cmd_cookies_paste(args):
         client, json_cookies = await _init_client(args)
         try:
             models = [m.model_name for m in (client.list_models() or [])]
+            if client.account_status.name != "AVAILABLE":
+                print(f"❌ Google không nhận đăng nhập (trạng thái {client.account_status.name}) – cookie đã bị thu hồi.")
+                return 1
             print(
                 f"✅ Cookie hoạt động tốt! (Nguồn: {client._cookie_source}, Models: {', '.join(models)})"
             )

@@ -1029,6 +1029,19 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             if norm_target == norm_model or norm_target in norm_model.split("-"):
                 return m
 
+        # 4th priority: tên bậc chung (gemini-flash / gemini-flash-lite / gemini-pro). Google đổi tên mã liên tục
+        # (argon → hydrogen / neon / carbon…) và tên hiển thị theo ngôn ngữ tài khoản ("Trợ giúp hằng ngày"…), nên
+        # map theo THỨ TỰ model Google trả về (nhanh → mạnh), bỏ qua "Tự động": flash* = model đầu, pro = model kế.
+        tier = target.removeprefix("gemini-")
+        if tier in ("flash", "flash-lite", "pro"):
+            ordered = [
+                m
+                for m in self._model_registry.values()
+                if m.is_available and not any(a in ("auto", "tự động", "tự-động") for a in m.aliases)
+            ]
+            if ordered:
+                return ordered[min(1, len(ordered) - 1)] if tier == "pro" else ordered[0]
+
         available_names = [m.model_name for m in self._model_registry.values()]
         raise ValueError(
             f"Unknown model name: '{name}'. Available registered models: "

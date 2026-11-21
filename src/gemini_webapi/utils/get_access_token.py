@@ -471,7 +471,8 @@ async def get_access_token(
                     if group_name != "Guest" and _is_signin_page(response):
                         logger.warning(
                             f"Init attempt ({attempts}) from {group_name}: Google redirected to the sign-in page "
-                            "- __Secure-1PSID is no longer valid (signed out / revoked). Please paste new cookies."
+                            "- cookies are missing SID / OSID (paste the whole Cookie header, not only "
+                            "__Secure-1PSID / __Secure-1PSIDTS) or the session was signed out / revoked."
                         )
                         continue
                     if payload := _extract_payload(response):

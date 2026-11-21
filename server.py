@@ -30,7 +30,12 @@ import urllib.request
 
 from curl_cffi.requests import AsyncSession
 from gemini_webapi import GeminiClient, logger
-from gemini_webapi.constants import COOKIE_1PSID, COOKIE_1PSIDTS
+from gemini_webapi.constants import (
+    COOKIE_1PSID,
+    COOKIE_1PSIDTS,
+    missing_auth_cookies,
+    session_cookies,
+)
 from gemini_webapi.types.image import GeneratedImage
 from gemini_webapi.utils import (
     extract_cookie_value,
@@ -420,8 +425,8 @@ PLAYGROUND_HTML = r"""<!DOCTYPE html>
 
         <div class="card">
           <h2>2. Cập nhật / Dán Cookie Thủ Công</h2>
-          <label>Dán JSON, chuỗi Cookie Header, hoặc __Secure-1PSID=...:</label>
-          <textarea id="rawCookieInput" style="min-height:120px;" placeholder='{"__Secure-1PSID": "...", "__Secure-1PSIDTS": "..."}'></textarea>
+          <label>Dán NGUYÊN dòng Cookie (F12 → Network → bấm 1 request tới gemini.google.com → Request Headers → chép cả dòng <code>cookie:</code>). Bắt buộc có <code>__Secure-1PSID</code>, <code>__Secure-1PSIDTS</code>, <code>SID</code>, <code>OSID</code>:</label>
+          <textarea id="rawCookieInput" style="min-height:120px;" placeholder='SID=...; OSID=...; __Secure-1PSID=...; __Secure-1PSIDTS=...; ...'></textarea>
           <button onclick="saveRawCookies()">💾 Lưu vào cookies.json & Khởi tạo lại</button>
           <pre id="cookieOut" style="display:none;"></pre>
         </div>
@@ -1602,7 +1607,7 @@ OPENAPI_SPEC: dict[str, Any] = {
                                 "properties": {
                                     "raw": {
                                         "type": "string",
-                                        "example": "__Secure-1PSID=...; __Secure-1PSIDTS=...",
+                                        "example": "SID=...; OSID=...; __Secure-1PSID=...; __Secure-1PSIDTS=...",
                                     }
                                 },
                             }
@@ -3206,22 +3211,17 @@ class GeminiAPIServer:
         browsers = [browser_filter] if browser_filter and browser_filter != "auto" else None
         found_sources: dict[str, dict[str, str]] = {}
 
+        # Giữ đủ cookie phiên (SID, OSID…), không chỉ 1PSID / 1PSIDTS – thiếu là Google bắt đăng nhập lại
         if cdp_list := await load_cdp_cookies(domain_name="google.com", verbose=True):
-            c_map = {c["name"]: c["value"] for c in cdp_list}
+            c_map = session_cookies({c["name"]: c["value"] for c in cdp_list})
             if COOKIE_1PSID in c_map:
-                found_sources["cdp"] = {
-                    COOKIE_1PSID: c_map[COOKIE_1PSID],
-                    COOKIE_1PSIDTS: c_map.get(COOKIE_1PSIDTS, ""),
-                }
+                found_sources["cdp"] = c_map
 
         bc3_map = load_browser_cookies(domain_name="google.com", verbose=True, browsers=browsers)
         for b_name, c_list in bc3_map.items():
-            c_map = {c["name"]: c["value"] for c in c_list}
+            c_map = session_cookies({c["name"]: c["value"] for c in c_list})
             if COOKIE_1PSID in c_map:
-                found_sources[b_name] = {
-                    COOKIE_1PSID: c_map[COOKIE_1PSID],
-                    COOKIE_1PSIDTS: c_map.get(COOKIE_1PSIDTS, ""),
-                }
+                found_sources[b_name] = c_map
 
         if not found_sources:
             await self._send_json(
@@ -3241,20 +3241,8 @@ class GeminiAPIServer:
         self._save_file_cookies(chosen_cookies)
         try:
             await self.ensure_client(force_reinit=True)
-            models_list = [m.model_name for m in (self.client.list_models() or [])] if self.client else []
-            with contextlib.suppress(RuntimeError):
-                asyncio.create_task(
-                    self.monitor.send_telegram(
-                        "\n".join(
-                            [
-                                "🔑 <b>Đã cập nhật Cookie Gemini (Auto-Fetch)</b>",
-                                f"🕒 {_vn_time()} · {_escape_html(self.monitor.server_url)}",
-                                f"Nguồn: <code>{_escape_html(chosen_source)}</code> · Trạng thái: <code>AVAILABLE</code>",
-                                f"Models: {_escape_html(', '.join(models_list) or 'default')}",
-                            ]
-                        )
-                    )
-                )
+            if not await self._report_cookie_update(writer, f"Auto-Fetch {chosen_source}"):
+                return
             await self._send_json(
                 writer,
                 200,
@@ -3277,18 +3265,60 @@ class GeminiAPIServer:
                 },
             )
 
-    async def _handle_cookies_paste(
-        self, writer: asyncio.StreamWriter, body: dict[str, Any]
-    ) -> None:
-        raw = str(body.get("raw") or "")
-        parsed = parse_raw_cookies(raw)
-        if COOKIE_1PSID not in parsed:
+    async def _report_cookie_update(self, writer: asyncio.StreamWriter, how: str) -> bool:
+        """Sau khi nạp cookie mới: báo Telegram trạng thái THẬT. Không AVAILABLE (chạy chế độ khách)
+        → trả 400 cho người dán và trả về False. Trước đây luôn báo "AVAILABLE" dù cookie không đăng nhập được."""
+        client = self.client
+        status = client.account_status.name if client else "UNINITIALIZED"
+        ok = status == "AVAILABLE"
+        models_list = [m.model_name for m in (client.list_models() or [])] if client else []
+        with contextlib.suppress(RuntimeError):
+            asyncio.create_task(
+                self.monitor.send_telegram(
+                    "\n".join(
+                        [
+                            f"{'🔑' if ok else '🔴'} <b>Cập nhật Cookie Gemini ({_escape_html(how)})</b>"
+                            + ("" if ok else " – KHÔNG đăng nhập được"),
+                            f"🕒 {_vn_time()} · {_escape_html(self.monitor.server_url)}",
+                            f"Nguồn: <code>{_escape_html(getattr(client, '_cookie_source', 'N/A'))}</code> · "
+                            f"Trạng thái: <code>{_escape_html(status)}</code>",
+                            f"Models: {_escape_html(', '.join(models_list) or 'default')}",
+                        ]
+                    )
+                )
+            )
+        if not ok:
             await self._send_json(
                 writer,
                 400,
                 {
                     "ok": False,
-                    "error": "Không tìm thấy __Secure-1PSID trong dữ liệu bạn dán.",
+                    "account_status": status,
+                    "error": (
+                        f"Cookie đã lưu nhưng Google không nhận đăng nhập (trạng thái {status}). Cookie đã bị "
+                        "đăng xuất / thu hồi, hoặc thiếu SID / OSID – hãy chép lại NGUYÊN dòng cookie."
+                    ),
+                },
+            )
+        return ok
+
+    async def _handle_cookies_paste(
+        self, writer: asyncio.StreamWriter, body: dict[str, Any]
+    ) -> None:
+        raw = str(body.get("raw") or "")
+        parsed = session_cookies(parse_raw_cookies(raw))
+        # Google cần đủ 1PSID + 1PSIDTS + SID + OSID (đo 2026-11-21). Thiếu thì từ chối luôn – nếu lưu
+        # thì sẽ trộn với SID / OSID cũ trong cookies.json (khác phiên) và chạy chế độ khách.
+        if missing := missing_auth_cookies(parsed):
+            await self._send_json(
+                writer,
+                400,
+                {
+                    "ok": False,
+                    "error": (
+                        f"Thiếu cookie: {', '.join(missing)}. Hãy dán NGUYÊN dòng cookie: F12 → Network → "
+                        "bấm 1 request tới gemini.google.com → Request Headers → chép cả dòng 'cookie:'."
+                    ),
                     "parsed_keys": list(parsed.keys()),
                 },
             )
@@ -3297,29 +3327,17 @@ class GeminiAPIServer:
         self._save_file_cookies(parsed)
         try:
             await self.ensure_client(force_reinit=True)
-            models_list = [m.model_name for m in (self.client.list_models() or [])] if self.client else []
-            cookie_src = getattr(self.client, "_cookie_source", "Base Cookies")
-            with contextlib.suppress(RuntimeError):
-                asyncio.create_task(
-                    self.monitor.send_telegram(
-                        "\n".join(
-                            [
-                                "🔑 <b>Đã cập nhật Cookie Gemini (Paste)</b>",
-                                f"🕒 {_vn_time()} · {_escape_html(self.monitor.server_url)}",
-                                f"Nguồn: <code>{_escape_html(cookie_src)}</code> · Trạng thái: <code>AVAILABLE</code>",
-                                f"Models: {_escape_html(', '.join(models_list) or 'default')}",
-                            ]
-                        )
-                    )
-                )
+            if not await self._report_cookie_update(writer, "Paste"):
+                return
             await self._send_json(
                 writer,
                 200,
                 {
                     "ok": True,
                     "saved_to": str(self.cookies_path.resolve()),
-                    "cookie_source": cookie_src,
-                    "models": models_list,
+                    "cookie_source": getattr(self.client, "_cookie_source", "Base Cookies"),
+                    "account_status": "AVAILABLE",
+                    "models": [m.model_name for m in (self.client.list_models() or [])] if self.client else [],
                 },
             )
         except Exception as e:
@@ -3497,7 +3515,12 @@ async def run_api_server(
         # Trạng thái thật (trước đây ghi cứng AVAILABLE – cookie chết vẫn báo 🟢 lúc khởi động)
         acct = app.client.account_status.name if app.client else "UNINITIALIZED"
         if acct != "AVAILABLE":
-            print(f"⚠️  Tài khoản Gemini: {acct} – cookie không đăng nhập được, hãy dán cookie mới.")
+            missing = missing_auth_cookies(app._load_file_cookies())
+            print(
+                f"⚠️  Tài khoản Gemini: {acct} – cookie không đăng nhập được"
+                + (f" (cookies.json thiếu {', '.join(missing)})" if missing else "")
+                + ". Hãy dán NGUYÊN dòng cookie mới."
+            )
         if app.monitor.is_configured:
             await app.monitor.send_telegram(
                 "\n".join(

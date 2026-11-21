@@ -13,6 +13,7 @@ from gemini_webapi.constants import (
     COOKIE_1PSIDTS,
     COOKIE_CACHE_EXTENSION,
     COOKIE_CACHE_PREFIX,
+    REQUIRED_AUTH_COOKIES,
     Endpoint,
     Headers,
     format_http_version,
@@ -266,7 +267,9 @@ def save_cookies(
 
     cookie_list = []
     for cookie in cookies.jar:
-        is_auth_cookie = cookie.name in [COOKIE_1PSID, COOKIE_1PSIDTS]
+        # SID / OSID dán tay không có hạn (expires None) → trước đây bị bỏ khỏi cache, lần khởi động
+        # sau dùng cache thiếu 2 cookie này là bị Google bắt đăng nhập lại
+        is_auth_cookie = cookie.name in REQUIRED_AUTH_COOKIES
         domain = cookie.domain.lstrip(".").lower() if cookie.domain else ""
         is_google_domain = domain == "google.com" or domain.endswith(".google.com")
         if is_google_domain and (
