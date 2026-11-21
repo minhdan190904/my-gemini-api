@@ -338,14 +338,16 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                     self.refresh_task.cancel()
                     self.refresh_task = None
 
-                if self.auto_refresh and self._check_account_status():
+                # Chạy cả khi lúc khởi động chưa AVAILABLE: gia hạn __Secure-1PSIDTS có thể tự cứu phiên
+                # (1PSID còn sống, chỉ 1PSIDTS hết hạn) – trước đây không tạo task → không bao giờ tự hồi lại.
+                if self.auto_refresh:
                     self.refresh_task = asyncio.create_task(self.start_auto_refresh())
 
                 if self.activity_task:
                     self.activity_task.cancel()
                     self.activity_task = None
 
-                if self.auto_refresh and self._check_account_status():
+                if self.auto_refresh:
                     self.activity_task = asyncio.create_task(self.start_activity_watchdog())
 
                 logger.success("Gemini client initialized successfully.")
@@ -436,12 +438,15 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             if not self._running:
                 break
 
+            # Tài khoản đang không AVAILABLE → bỏ qua nhịp này nhưng KHÔNG dừng hẳn vòng lặp
+            # (trước đây break vĩnh viễn, phiên hồi lại cũng không có heartbeat nữa)
             if not self._check_account_status():
-                logger.warning(
-                    f"Stopping the activity watchdog. Account status: {self.account_status.name} - {self.account_status.description}"
-                )
-                self.activity_task = None
-                break
+                if self.verbose:
+                    logger.debug(
+                        f"Heartbeat skipped. Account status: {self.account_status.name} - {self.account_status.description}"
+                    )
+                self.last_activity_time = time.time()
+                continue
 
             try:
                 logger.debug(
@@ -468,13 +473,10 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
             if not self._running:
                 break
 
-            if not self._check_account_status():
-                logger.warning(
-                    f"Stopping the auto-refresh cookies. Account status: {self.account_status.name} - {self.account_status.description}"
-                )
-                self.refresh_task = None
-                break
-
+            # KHÔNG dừng khi tài khoản không AVAILABLE (trước đây break vĩnh viễn → 1PSIDTS không được
+            # gia hạn nữa → vài giờ sau cookie chết thật). Vẫn gia hạn: nếu 1PSID còn sống thì gia hạn
+            # xong phiên tự hồi lại, rồi hỏi lại Google trạng thái tài khoản.
+            was_available = self._check_account_status()
             try:
                 async with self._lock:
                     # Refresh all cookies in the background to keep the session alive.
@@ -488,6 +490,11 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                             "The current cookies may have been invalidated by the server. "
                             "Retrying in next interval."
                         )
+
+                if not was_available:
+                    await self._fetch_user_status()
+                    if self._check_account_status():
+                        logger.success("Account is AVAILABLE again after cookie rotation.")
             except asyncio.CancelledError:
                 raise
             except AuthError:
@@ -1139,6 +1146,18 @@ class GeminiClient(ChatMixin, GemMixin, ResearchMixin):
                 await self._fetch_user_status()
             except Exception as e:
                 logger.debug(f"Failed to re-check account status: {e}")
+        # Vẫn UNAUTHENTICATED → thử gia hạn __Secure-1PSIDTS 1 lần rồi hỏi lại (1PSIDTS hết hạn mà 1PSID
+        # còn sống thì cứu được, khỏi phải dán cookie mới). rotate_1psidts tự bỏ qua nếu vừa gia hạn < 60s.
+        if self.account_status == AccountStatus.UNAUTHENTICATED:
+            try:
+                async with self._lock:
+                    rotated = await rotate_1psidts(
+                        self._live_client, base_psid=self._base_psid, verbose=self.verbose
+                    )
+                if rotated:
+                    await self._fetch_user_status()
+            except Exception as e:
+                logger.debug(f"Rotation while recovering account status failed: {e}")
         self._check_account_status(raise_error=True)
 
     def _check_account_status(self, raise_error: bool = False) -> bool:

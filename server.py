@@ -2425,7 +2425,16 @@ class GeminiAPIServer:
 
         client = self.client
         initialized = bool(client and client._running)
-        raw_models = (client.list_models() or []) if initialized and client else []
+        # account_status là giá trị lưu từ lần hỏi trước – request chỉ chữ không hỏi lại Google, nên giá trị cũ
+        # có thể sai cả 2 chiều. Không AVAILABLE → hỏi lại (kèm thử gia hạn cookie), tối đa 1 lần / 60 giây,
+        # để web (exam-epu-web) dựa vào /health biết chính xác lúc nào AI dùng lại được.
+        if initialized and client and client.account_status.name != "AVAILABLE":
+            now = time.time()
+            if now - getattr(self, "_health_recheck_at", 0.0) >= 60:
+                self._health_recheck_at = now
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(client._ensure_account_available(), timeout=20)
+        raw_models =(client.list_models() or []) if initialized and client else []
         models = [m.model_name for m in raw_models]
         models_detail = [
             {
