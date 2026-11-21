@@ -223,6 +223,14 @@ async def _send_request(
     return response
 
 
+def _is_signin_page(response: Response) -> bool:
+    """`True` if the init request ended on Google's sign-in page instead of the Gemini app."""
+    if "accounts.google.com" in str(response.url):
+        return True
+    build_label = _BUILD_LABEL_RE.search(response.text)
+    return bool(build_label and build_label.group(1).startswith("boq_identityfrontend"))
+
+
 def _extract_payload(
     response: Response,
 ) -> tuple[str | None, str | None, str | None, str | None, str | None] | None:
@@ -457,6 +465,15 @@ async def get_access_token(
                         is_transient=is_transient_network_error,
                         on_retry=_on_retry,
                     )
+                    # Cookie chết (1PSID bị thu hồi / đăng xuất) → Google chuyển sang trang đăng nhập.
+                    # Trang đó CŨNG có token SNlM0e nên trước đây bị coi là "thành công", rồi mọi RPC sau
+                    # lỗi 400 khó hiểu. Coi như nhóm cookie này không đăng nhập được, thử nhóm tiếp theo.
+                    if group_name != "Guest" and _is_signin_page(response):
+                        logger.warning(
+                            f"Init attempt ({attempts}) from {group_name}: Google redirected to the sign-in page "
+                            "- __Secure-1PSID is no longer valid (signed out / revoked). Please paste new cookies."
+                        )
+                        continue
                     if payload := _extract_payload(response):
                         access_token = payload[0]
                         # For authenticated candidate groups, require a valid access token.

@@ -3494,13 +3494,17 @@ async def run_api_server(
         cookie_src = app.client._cookie_source if app.client else "N/A"
         models_list = [m.model_name for m in (app.client.list_models() or [])] if app.client else []
         print(f"✅ Đã kết nối Gemini thành công! (Nguồn cookie: {cookie_src})")
+        # Trạng thái thật (trước đây ghi cứng AVAILABLE – cookie chết vẫn báo 🟢 lúc khởi động)
+        acct = app.client.account_status.name if app.client else "UNINITIALIZED"
+        if acct != "AVAILABLE":
+            print(f"⚠️  Tài khoản Gemini: {acct} – cookie không đăng nhập được, hãy dán cookie mới.")
         if app.monitor.is_configured:
             await app.monitor.send_telegram(
                 "\n".join(
                     [
-                        f"🟢 <b>Gemini API khởi động</b> · {_vn_time()}",
+                        f"{'🟢' if acct == 'AVAILABLE' else '🔴'} <b>Gemini API khởi động</b> · {_vn_time()}",
                         f"🌐 Endpoint: <code>{_escape_html(server_url)}</code> · Đa luồng: {max_concurrency}",
-                        f"🔑 Nguồn Cookie: <code>{_escape_html(cookie_src)}</code> · Trạng thái: <code>AVAILABLE</code>",
+                        f"🔑 Nguồn Cookie: <code>{_escape_html(cookie_src)}</code> · Trạng thái: <code>{_escape_html(acct)}</code>",
                         f"🤖 Models: {_escape_html(', '.join(models_list) or 'default')}",
                     ]
                 )
